@@ -1,0 +1,17 @@
+[
+  {"code": "PHY101", "title": "Mexanika", "questions": [
+    {"question": "Erkin tushish tezlanishi (g) taxminan qancha?", "options": ["9,8 m/s²", "8,9 m/s²", "10,8 m/s²", "6,7 m/s²"], "answer": 0},
+    {"question": "Kuch birligi nima?", "options": ["Joul", "Nyuton", "Vatt", "Paskal"], "answer": 1},
+    {"question": "Tezlik formulasi qaysi?", "options": ["v = s/t", "v = s·t", "v = t/s", "v = m·a"], "answer": 0}
+  ]},
+  {"code": "PHY102", "title": "Elektr", "questions": [
+    {"question": "Om qonuni qanday ifodalanadi?", "options": ["I = U·R", "I = U/R", "I = R/U", "U = I/R"], "answer": 1},
+    {"question": "Quvvat birligi nima?", "options": ["Nyuton", "Joul", "Vatt", "Amper"], "answer": 2},
+    {"question": "Kuchlanish birligi?", "options": ["Amper", "Volt", "Om", "Vatt"], "answer": 1}
+  ]},
+  {"code": "PHY103", "title": "Termodinamika", "questions": [
+    {"question": "Suvning qaynash temperaturasi (normal bosimda)?", "options": ["90°C", "100°C", "110°C", "80°C"], "answer": 1},
+    {"question": "Absolyut nol necha gradus?", "options": ["-273°C", "-100°C", "-373°C", "0°C"], "answer": 0},
+    {"question": "Issiqlik miqdori formulasi?", "options": ["Q = m·c·Δt", "Q = m/c", "Q = c/Δt", "Q = m·c"], "answer": 0}
+  ]}
+]

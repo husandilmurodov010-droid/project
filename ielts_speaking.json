@@ -1,0 +1,15 @@
+[
+  {"part": 1, "topic": "Hometown", "question": "Where is your hometown and what do you like most about it?"},
+  {"part": 1, "topic": "Work/Study", "question": "Do you work or are you a student? What do you enjoy about it?"},
+  {"part": 1, "topic": "Hobbies", "question": "What do you usually do in your free time?"},
+  {"part": 1, "topic": "Technology", "question": "How often do you use your mobile phone?"},
+  {"part": 1, "topic": "Food", "question": "What kind of food do you prefer, and why?"},
+  {"part": 2, "topic": "A memorable journey", "question": "Describe a memorable journey you have taken. You should say: where you went, who you went with, what you did, and explain why it was memorable."},
+  {"part": 2, "topic": "A person you admire", "question": "Describe a person you admire. You should say: who this person is, how you know them, what qualities they have, and explain why you admire them."},
+  {"part": 2, "topic": "A skill you learned", "question": "Describe a skill you learned recently. You should say: what it is, how you learned it, how long it took, and explain how it helped you."},
+  {"part": 2, "topic": "A place you like", "question": "Describe a place you like to visit. You should say: where it is, how often you go, what you do there, and explain why you like it."},
+  {"part": 3, "topic": "Education", "question": "How has education changed in your country over the last 20 years?"},
+  {"part": 3, "topic": "Technology & Society", "question": "Do you think technology makes people more connected or more isolated? Why?"},
+  {"part": 3, "topic": "Environment", "question": "What role should governments play in protecting the environment?"},
+  {"part": 3, "topic": "Globalisation", "question": "What are the advantages and disadvantages of globalisation for developing countries?"}
+]

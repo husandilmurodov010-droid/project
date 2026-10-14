@@ -1,0 +1,17 @@
+[
+  {"code": "MTH101", "title": "Kvadrat tenglamalar", "questions": [
+    {"question": "x² − 5x + 6 = 0 tenglamaning ildizlari?", "options": ["1 va 6", "2 va 3", "-2 va -3", "3 va 4"], "answer": 1},
+    {"question": "Diskriminant D = b² − 4ac formula bilan topiladi. x² − 4x + 4 = 0 da D nechaga teng?", "options": ["0", "4", "8", "16"], "answer": 0},
+    {"question": "x² + 2x − 8 = 0 ning kichik ildizi?", "options": ["-4", "-2", "2", "4"], "answer": 0}
+  ]},
+  {"code": "MTH102", "title": "Foiz va nisbat", "questions": [
+    {"question": "500 ning 20% i nechaga teng?", "options": ["50", "75", "100", "125"], "answer": 2},
+    {"question": "Narx 80 000 dan 100 000 ga oshdi. O'sish foizi?", "options": ["20%", "25%", "30%", "15%"], "answer": 1},
+    {"question": "3:4 nisbatda 56 ni bo'lsang, katta qismi?", "options": ["24", "28", "32", "36"], "answer": 2}
+  ]},
+  {"code": "MTH103", "title": "Progressiya", "questions": [
+    {"question": "Arifmetik progressiya: 3, 7, 11, ... 10-hadi?", "options": ["37", "39", "41", "43"], "answer": 1},
+    {"question": "Geometrik progressiya: 2, 6, 18, ... 5-hadi?", "options": ["54", "108", "162", "216"], "answer": 2},
+    {"question": "1+2+3+...+100 yig'indisi?", "options": ["4950", "5050", "5150", "5000"], "answer": 1}
+  ]}
+]

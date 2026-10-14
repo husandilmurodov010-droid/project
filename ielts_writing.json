@@ -1,0 +1,8 @@
+[
+  {"task": 1, "type": "Academic", "minutes": 20, "min_words": 150, "prompt": "The chart below shows the percentage of household income spent on food in five countries in 2025. Summarise the information by selecting and reporting the main features, and make comparisons where relevant."},
+  {"task": 1, "type": "Academic", "minutes": 20, "min_words": 150, "prompt": "The diagram illustrates the process of recycling plastic bottles. Summarise the information by selecting and reporting the main features."},
+  {"task": 1, "type": "General", "minutes": 20, "min_words": 150, "prompt": "You recently stayed at a hotel and were unhappy with the service. Write a letter to the manager. Explain why you stayed there, what went wrong, and what you would like them to do."},
+  {"task": 2, "type": "Academic", "minutes": 40, "min_words": 250, "prompt": "Some people believe that university education should be free for everyone, while others think students should pay for it. Discuss both views and give your own opinion."},
+  {"task": 2, "type": "Academic", "minutes": 40, "min_words": 250, "prompt": "In many countries, the number of people choosing to work from home has increased. Do the advantages of this trend outweigh the disadvantages?"},
+  {"task": 2, "type": "Academic", "minutes": 40, "min_words": 250, "prompt": "Artificial intelligence is increasingly used in the workplace. Is this a positive or negative development for society?"}
+]
