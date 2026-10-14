@@ -15,7 +15,7 @@ import sys
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramConflictError
+from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -816,7 +816,8 @@ async def run_webhook():
         log.warning("WEBHOOK_SECRET berilmagan - generatsiya qilindi")
 
     webhook_url = f"{base}/webhook/{secret}"
-    health = HealthServer(C.PORT or 10000, build_state_provider())
+    port = C.PORT or 10000
+    health = HealthServer(port, build_state_provider())
     app = health.build()
 
     async def webhook_handler(request):
@@ -831,24 +832,30 @@ async def run_webhook():
 
     app.router.add_post("/webhook/{secret}", webhook_handler)
 
-    await health.start()
-    await bot.set_webhook(webhook_url, secret_token=secret,
-                          allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    log.info("Webhook registered: %s", f"{base}/webhook/***")
-    health.ready = True
-
+    # ONE runner owns the port: it serves /health, /ping, /status AND the webhook.
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", C.PORT or 10000)
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    log.info("HTTP server listening on 0.0.0.0:%s (/health, /ping, /status, /webhook)", port)
 
     try:
+        await bot.set_webhook(webhook_url, secret_token=secret,
+                              allowed_updates=dp.resolve_used_update_types(),
+                              drop_pending_updates=True)
+        log.info("Webhook registered: %s", f"{base}/webhook/***")
+        health.ready = True
         while True:
             await asyncio.sleep(3600)
-    finally:
-        await health.stop()
-        await runner.cleanup()
-
+    except TelegramBadRequest as e:
+        # Telegram requires an HTTPS URL. If we cannot register a webhook we still
+        # serve the health endpoints and fall back to long polling in-process.
+        log.warning("Webhook o'rnatilmadi (%s) - polling'ga o'tamiz", e)
+        health.ready = True
+        try:
+            await dp.start_polling(bot, handle_signals=False)
+        finally:
+            await runner.cleanup()
 
 async def _feed(data):
     try:
@@ -898,6 +905,9 @@ def main():
         asyncio.run(run())
     except KeyboardInterrupt:
         log.info("to'xtatildi")
+    except Exception:
+        log.exception("FATAL: bot ishga tushmadi")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
