@@ -395,6 +395,88 @@ class Database:
         row = await cur.fetchone()
         return int(row["c"]) if row else 0
 
+    # ================================================================== #
+    # v10: foydalanuvchi o'sish dinamikasi (kunlik / oylik)
+    # ================================================================== #
+    # `users.created_at` — foydalanuvchi ro'yxatdan o'tgan vaqt (unix ts).
+    # Quyidagi so'rovlar shu ustun bo'yicha guruhlab, yangi qo'shilgan
+    # foydalanuvchilar sonini qaytaradi. `localtime` modifikatori orqali
+    # vaqt serverning mahalliy zonasiga o'giriladi — kun/oy chegaralari
+    # shu tufayli to'g'ri chiqadi.
+    async def count_users_since(self, since_ts: float) -> int:
+        """Berilgan vaqtdan keyin ro'yxatdan o'tgan foydalanuvchilar soni."""
+        cur = await self.db.execute(
+            "SELECT COUNT(*) AS c FROM users WHERE created_at >= ?",
+            (float(since_ts),),
+        )
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def count_users_between(self, start_ts: float, end_ts: float) -> int:
+        """[start_ts, end_ts) oralig'ida qo'shilganlar soni."""
+        cur = await self.db.execute(
+            "SELECT COUNT(*) AS c FROM users "
+            "WHERE created_at >= ? AND created_at < ?",
+            (float(start_ts), float(end_ts)),
+        )
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def user_growth_daily(self, days: int = 30) -> list[tuple[str, int]]:
+        """Oxirgi `days` kun uchun KUNLIK yangi foydalanuvchilar soni.
+
+        Qaytaradi: ``[('2026-10-01', 5), ...]`` — sana bo'yicha o'sish
+        tartibida (eng eskisi birinchi).
+        """
+        cur = await self.db.execute(
+            "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime') AS d, "
+            "COUNT(*) AS c FROM users GROUP BY d ORDER BY d DESC LIMIT ?",
+            (int(days),),
+        )
+        rows = await cur.fetchall()
+        return [(str(r["d"]), int(r["c"])) for r in reversed(rows) if r["d"]]
+
+    async def user_growth_monthly(self, months: int = 12) -> list[tuple[str, int]]:
+        """Oxirgi `months` oy uchun OYLIK yangi foydalanuvchilar soni.
+
+        Qaytaradi: ``[('2026-01', 12), ...]`` — oy bo'yicha o'sish tartibida.
+        """
+        cur = await self.db.execute(
+            "SELECT strftime('%Y-%m', created_at, 'unixepoch', 'localtime') AS m, "
+            "COUNT(*) AS c FROM users GROUP BY m ORDER BY m DESC LIMIT ?",
+            (int(months),),
+        )
+        rows = await cur.fetchall()
+        return [(str(r["m"]), int(r["c"])) for r in reversed(rows) if r["m"]]
+
+    async def user_growth_summary(self) -> dict[str, Any]:
+        """O'sish grafigi uchun qisqa xulosa ko'rsatkichlari.
+
+        jami, bugun, 7 kun, shu oy (30 kun), o'rtacha kunlik va
+        eng faol kun/oy.
+        """
+        now = time.time()
+        total = await self.count_users()
+        today = await self.count_users_since(now - 86400)
+        week = await self.count_users_since(now - 7 * 86400)
+        month = await self.count_users_since(now - 30 * 86400)
+        daily = await self.user_growth_daily(30)
+        monthly = await self.user_growth_monthly(12)
+        avg_daily = round(month / 30, 1) if month else 0.0
+        best_day = max(daily, key=lambda x: x[1]) if daily else ("", 0)
+        best_month = max(monthly, key=lambda x: x[1]) if monthly else ("", 0)
+        return {
+            "total": total,
+            "today": today,
+            "week": week,
+            "month": month,
+            "avg_daily": avg_daily,
+            "best_day": best_day,
+            "best_month": best_month,
+            "active_days": len(daily),
+            "active_months": len(monthly),
+        }
+
     # ------------------------------------------------------------------ #
     # Suhbat tarixi
     # ------------------------------------------------------------------ #

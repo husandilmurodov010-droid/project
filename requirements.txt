@@ -3,3 +3,4 @@ aiohttp==3.10.5
 aiosqlite==0.20.0
 python-dotenv==1.0.1
 pypdf==5.1.0
+matplotlib==3.9.2

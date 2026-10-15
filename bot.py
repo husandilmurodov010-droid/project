@@ -33,6 +33,7 @@ from __future__ import annotations
 import aiohttp
 import asyncio
 import html
+import io
 import json
 import logging
 import re
@@ -310,6 +311,193 @@ async def _typing(message: Message) -> None:
 
 def _split(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
+
+
+# --------------------------------------------------------------------------- #
+# v10: FOYDALANUVCHI O'SISH GRAFIGI (kunlik / oylik) — FAQAT ADMIN
+# --------------------------------------------------------------------------- #
+# Manba: `users.created_at`. Grafik matplotlib bilan PNG qilib chiziladi;
+# matplotlib yo'q yoki xato bersa — matnli (ASCII/emoji) ustunli grafik.
+_MONTH_UZ = {
+    1: "Yan", 2: "Fev", 3: "Mar", 4: "Apr", 5: "May", 6: "Iyn",
+    7: "Iyl", 8: "Avg", 9: "Sen", 10: "Okt", 11: "Noy", 12: "Dek",
+}
+
+
+def _short_day_label(day: str) -> str:
+    """`2026-10-05` -> `05.10`."""
+    try:
+        _y, m, d = str(day).split("-")
+        return f"{d}.{m}"
+    except Exception:  # noqa: BLE001
+        return str(day)
+
+
+def _month_label(month: str) -> str:
+    """`2026-10` -> `Okt 26`."""
+    try:
+        y, m = str(month).split("-")
+        return f"{_MONTH_UZ.get(int(m), m)} {y[2:]}"
+    except Exception:  # noqa: BLE001
+        return str(month)
+
+
+def _daily_with_gaps(rows: list, days: int = 7) -> list:
+    """Oxirgi `days` kunni to'ldiradi (ma'lumot yo'q kun = 0)."""
+    have = {d: int(c) for d, c in rows}
+    out: list = []
+    today = datetime.now().date()
+    for i in range(days - 1, -1, -1):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        out.append((d, have.get(d, 0)))
+    return out
+
+
+def _monthly_with_gaps(rows: list, months: int = 6) -> list:
+    """Oxirgi `months` oyni to'ldiradi (ma'lumot yo'q oy = 0)."""
+    have = {m: int(c) for m, c in rows}
+    seq: list = []
+    now = datetime.now()
+    y, m = now.year, now.month
+    for _ in range(months):
+        seq.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    return [(k, have.get(k, 0)) for k in reversed(seq)]
+
+
+def _fmt_n(n: int) -> str:
+    """1000 -> `1 000` ko'rinishida."""
+    try:
+        return f"{int(n):,}".replace(",", " ")
+    except Exception:  # noqa: BLE001
+        return str(n)
+
+
+def _bar(value: int, peak: int, width: int = 18) -> str:
+    """ASCII/emoji ustun uzunligi (matnli grafik uchun)."""
+    if peak <= 0 or value <= 0:
+        return ""
+    return "█" * max(1, round(value / peak * width))
+
+
+def build_growth_text(daily: list, monthly: list, summary: dict) -> str:
+    """Grafik tagidagi XULOSA + matnli (ASCII) ustunli grafik (HTML)."""
+    total = int(summary.get("total", 0))
+    week = int(summary.get("week", 0))
+    month = int(summary.get("month", 0))
+    avg = summary.get("avg_daily", 0.0)
+    best_d = summary.get("best_day") or ("", 0)
+    best_m = summary.get("best_month") or ("", 0)
+
+    lines = [
+        "📈 <b>Foydalanuvchi o'sish grafigi</b>",
+        "",
+        f"👥 <b>Jami foydalanuvchilar:</b> {_fmt_n(total)}",
+        f"🆕 <b>Oxirgi 7 kun:</b> +{_fmt_n(week)}",
+        f"🗓 <b>Shu oy (30 kun):</b> +{_fmt_n(month)}",
+        f"📊 <b>O'rtacha kunlik o'sish:</b> {avg}/kun",
+    ]
+    if best_d[0]:
+        lines.append(f"🥇 <b>Eng faol kun:</b> {_short_day_label(best_d[0])} — +{best_d[1]}")
+    if best_m[0]:
+        lines.append(f"🏆 <b>Eng faol oy:</b> {_month_label(best_m[0])} — +{best_m[1]}")
+
+    lines.append("")
+    lines.append("🗓 <b>Kunlik o'sish (oxirgi 7 kun):</b>")
+    peak = max([c for _d, c in daily] or [0])
+    for d, c in daily[-7:]:
+        lines.append(f"  {_short_day_label(d)} │{_bar(c, peak)} {c}")
+    lines.append("")
+    lines.append("🗓 <b>Oylik o'sish (oxirgi 6 oy):</b>")
+    peak_m = max([c for _m, c in monthly] or [0])
+    for m, c in monthly[-6:]:
+        lines.append(f"  {_month_label(m)} │{_bar(c, peak_m)} {c}")
+    return "\n".join(lines)
+
+
+def render_growth_chart(daily: list, monthly: list) -> bytes | None:
+    """Kunlik va oylik o'sishni BITTA PNG rasmga chizadi (matplotlib).
+
+    O'qlar, sarlavhalar va nuqta/ustun ustidagi qiymatlar ko'rinadi.
+    Xato bo'lsa ``None`` qaytaradi — handler matnli grafikni yuboradi.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.ticker import MaxNLocator
+    except Exception as exc:  # noqa: BLE001
+        log.warning("matplotlib mavjud emas — matnli grafik ishlatiladi: %s", exc)
+        return None
+
+    try:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8.5), dpi=140)
+        fig.patch.set_facecolor("#ffffff")
+
+        # ---------------- 1) Kunlik o'sish (chiziqli) ----------------
+        dates = [datetime.strptime(d, "%Y-%m-%d") for d, _c in daily]
+        vals = [int(c) for _d, c in daily]
+        if dates:
+            ax1.plot(dates, vals, color="#2563eb", linewidth=2.2, marker="o",
+                     markersize=5.5, markerfacecolor="#1d4ed8", zorder=3)
+            ax1.fill_between(dates, vals, color="#93c5fd", alpha=0.35, zorder=1)
+            for x, y in zip(dates, vals):
+                ax1.annotate(str(y), (x, y), textcoords="offset points",
+                             xytext=(0, 9), ha="center", fontsize=8.5,
+                             color="#1e3a8a", fontweight="bold")
+            ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+            ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+            fig.autofmt_xdate(rotation=45)
+        ax1.set_title("Kunlik yangi foydalanuvchilar (oxirgi 7 kun)",
+                      fontsize=13, fontweight="bold", color="#111827")
+        ax1.set_xlabel("Sana", fontsize=10)
+        ax1.set_ylabel("Yangi foydalanuvchilar", fontsize=10)
+        ax1.grid(True, linestyle="--", alpha=0.35)
+        ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+        if vals:
+            ax1.set_ylim(0, max(vals) * 1.25 + 1)
+
+        # ---------------- 2) Oylik o'sish (ustunli) ----------------
+        labels = [_month_label(m) for m, _c in monthly]
+        mvals = [int(c) for _m, c in monthly]
+        if labels:
+            xpos = np.arange(len(labels))
+            bars = ax2.bar(xpos, mvals, color="#10b981", width=0.62,
+                           edgecolor="#047857", linewidth=0.8, zorder=3)
+            for b, v in zip(bars, mvals):
+                ax2.annotate(str(v), (b.get_x() + b.get_width() / 2, v),
+                             textcoords="offset points", xytext=(0, 4),
+                             ha="center", fontsize=8.5, color="#065f46",
+                             fontweight="bold")
+            ax2.set_xticks(xpos)
+            ax2.set_xticklabels(labels, fontsize=9)
+        ax2.set_title("Oylik yangi foydalanuvchilar (oxirgi 6 oy)",
+                      fontsize=13, fontweight="bold", color="#111827")
+        ax2.set_xlabel("Oy", fontsize=10)
+        ax2.set_ylabel("Yangi foydalanuvchilar", fontsize=10)
+        ax2.grid(True, axis="y", linestyle="--", alpha=0.35)
+        ax2.yaxis.set_major_locator(MaxNLocator(integer=True))
+        if mvals:
+            ax2.set_ylim(0, max(mvals) * 1.25 + 1)
+
+        fig.suptitle("Bot foydalanuvchilari o'sish grafigi",
+                     fontsize=15, fontweight="bold", color="#111827")
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        data = buf.getvalue()
+        buf.close()
+        return data or None
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Grafik chizishda xato: %s", exc)
+        return None
 
 
 # --- Navigatsiya tarixi (har bir foydalanuvchi uchun alohida) ---
@@ -855,6 +1043,7 @@ def stats_admin_kb():
     kb.button(text="🏆 Test ishlaganlar", callback_data="stats:testtakers")
     kb.button(text="➕ Kanal qo'shish", callback_data="stats:chanadd")
     kb.button(text="📈 Kanallar statistikasi", callback_data="stats:chanstats")
+    kb.button(text="📊 O'sish grafigi", callback_data="stats:growth")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1479,6 +1668,47 @@ async def cmd_stats(message: Message) -> None:
     await _ans(message, await build_stats_text(u))
 
 
+@dp.message(Command("growth"))
+async def cmd_growth(message: Message) -> None:
+    """O'sish grafigi (faqat admin) — `/growth` buyrug'i yoki Statistika
+    bo'limidagi «📊 O'sish grafigi» tugmasi bilan bir xil natija."""
+    u = message.from_user
+    if u:
+        await db.upsert_user(u.id, u.username, u.first_name)
+    if not u or not config.is_admin(u.id, u.username):
+        await _ans(message,
+            "🔒 *O'sish grafigi* faqat admin uchun.\n\n"
+            f"Admin: @{config.ADMIN_USERNAMES[0] if config.ADMIN_USERNAMES else 'admin'}"
+        )
+        return
+
+    await _typing(message)
+    daily_all = await db.user_growth_daily(30)
+    monthly_all = await db.user_growth_monthly(12)
+    summary = await db.user_growth_summary()
+    daily7 = _daily_with_gaps(daily_all, 7)
+    monthly6 = _monthly_with_gaps(monthly_all, 6)
+
+    png = await asyncio.to_thread(render_growth_chart, daily7, monthly6)
+    text = build_growth_text(daily7, monthly6, summary)
+    caption = text if len(text) <= 1000 else "\n".join(text.splitlines()[:16])
+
+    if png:
+        try:
+            await message.answer_photo(
+                BufferedInputFile(png, filename="osish_grafigi.png"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=_with_back(stats_admin_kb()),
+            )
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("Grafik rasmini yuborishda xato (cmd) — matnli grafik")
+
+    await _ans(message, text + "\n\n⚠️ Matnli grafik ko'rsatildi.",
+               parse_mode="HTML", reply_markup=stats_admin_kb())
+
+
 @dp.message(Command("history"))
 async def cmd_history(message: Message) -> None:
     u = message.from_user
@@ -1861,6 +2091,56 @@ async def on_menu_stats(cb: CallbackQuery) -> None:
         await _edit(cb, text, reply_markup=stats_admin_kb())
     except Exception:  # noqa: BLE001
         await _ans(cb.message, text, reply_markup=stats_admin_kb())
+
+
+@dp.callback_query(F.data == "stats:growth")
+async def on_stats_growth(cb: CallbackQuery) -> None:
+    """📊 O'sish grafigi — kunlik (7 kun) va oylik (6 oy) o'sish.
+
+    FAQAT admin. Grafik matplotlib bilan PNG qilib chiziladi, rasm ostida
+    qisqa xulosa yuboriladi. Rasm chizilmasa — matnli (ASCII) grafik.
+    """
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, "🔒 Faqat admin uchun.")
+        return
+
+    try:
+        await bot.send_chat_action(cb.message.chat.id, ChatAction.UPLOAD_PHOTO)
+    except Exception:  # noqa: BLE001
+        pass
+
+    daily_all = await db.user_growth_daily(30)
+    monthly_all = await db.user_growth_monthly(12)
+    summary = await db.user_growth_summary()
+
+    daily7 = _daily_with_gaps(daily_all, 7)
+    monthly6 = _monthly_with_gaps(monthly_all, 6)
+
+    png = await asyncio.to_thread(render_growth_chart, daily7, monthly6)
+    text = build_growth_text(daily7, monthly6, summary)
+    # Telegram rasm izohi (caption) 1024 belgidan oshmasligi kerak
+    caption = text if len(text) <= 1000 else "\n".join(text.splitlines()[:16])
+
+    if png:
+        try:
+            await cb.message.answer_photo(
+                BufferedInputFile(png, filename="osish_grafigi.png"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=_with_back(stats_admin_kb()),
+            )
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("Grafik rasmini yuborishda xato — matnli grafik yuboriladi")
+
+    await _edit(
+        cb,
+        text + "\n\n⚠️ Rasm generatsiyasi ishlamadi — ustunli grafik ko'rsatildi.",
+        parse_mode="HTML",
+        reply_markup=stats_admin_kb(),
+    )
 
 
 @dp.callback_query(F.data == "stats:chanadd")
