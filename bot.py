@@ -494,14 +494,16 @@ _GATE_ALLOWED_PREFIX = ("admin:chan:",)
 # Matnli buyruqlar: /start o'tadi — handler o'zi obuna xabarini beradi va
 # foydalanuvchini bazaga yozadi. Qolgan hamma narsa bloklanadi.
 _GATE_ALLOWED_COMMANDS = {"/start"}
+# DIQQAT: "my_chat_member" va "chat_member" bu ro'yxatda YO'Q — ular botning
+# o'z a'zoligi haqidagi hodisalar (masalan bot kanalga admin qilinishi).
+# Ularni to'sish kanal qo'shish oqimini butunlay o'ldiradi: admin hech qanday
+# bildirishnoma olmaydi. Gate bu hodisalarni har doim o'tkazib yuboradi.
 _GATE_INNER_EVENTS = (
     "message",
     "edited_message",
     "callback_query",
     "channel_post",
     "edited_channel_post",
-    "my_chat_member",
-    "chat_member",
 )
 
 
@@ -540,6 +542,16 @@ async def sub_gate_outer_middleware(handler, event, data):
     botning hech bir funksiyasidan foydalana olmaydi.
     """
     if not config.ENABLE_SUB_GATE or not config.REQUIRED_CHANNEL_URL:
+        return await handler(event, data)
+
+    # Bot a'zoligi hodisalari (my_chat_member / chat_member) hech qachon
+    # to'silmaydi: ular "foydalanuvchi funksiyadan foydalanmoqda" hodisasi emas,
+    # balki botning kanalga qo'shilishini bildiradi. Aks holda kanal qo'shish
+    # oqimi (adminga ruxsat so'rovi) umuman ishlamaydi.
+    if (
+        getattr(event, "my_chat_member", None) is not None
+        or getattr(event, "chat_member", None) is not None
+    ):
         return await handler(event, data)
 
     inner = _gate_inner(event)
@@ -654,10 +666,42 @@ async def _ask_gemini_custom(
 
 
 async def get_admin_ids() -> list[int]:
-    """Admin ID lar: .env dagi + botga /start yuborgan adminlar."""
-    ids = set(config.ADMIN_IDS)
-    ids.update(await db.get_registered_admins())
-    return list(ids)
+    """Adminning RAQAMLI Telegram ID larini ishonchli aniqlaydi.
+
+    Manbalar (birlashtiriladi):
+      1) .env / Render: ADMIN_IDS, ADMIN_ID
+      2) Bazadagi `admins` jadvali (botga /start yozgan adminlar)
+      3) Bazadagi `users`/`admins` jadvalidan ADMIN_USERNAMES bo'yicha qidiruv
+
+    Ilgari faqat (1) va (2) ishlatilardi — shu sababli ADMIN_ID o'rnatilmagan
+    va admin botga /start yozmagan holatda ro'yxat BO'SH qaytardi va adminga
+    hech qanday bildirishnoma yuborilmasdi. Endi (3) ham qo'shilgan.
+    """
+    ids: set[int] = set(config.ADMIN_IDS)
+
+    try:
+        ids.update(await db.get_registered_admins())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_registered_admins xato: %s", exc)
+
+    try:
+        names = [u for u in config.ADMIN_USERNAMES if u]
+        if names:
+            ids.update(await db.get_user_ids_by_usernames(names))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Admin username bo'yicha qidiruv xato: %s", exc)
+
+    ids.discard(0)
+    result = sorted(ids)
+    if not result:
+        log.error(
+            "ADMIN TOPILMADI! ADMIN_IDS=%s ADMIN_ID(belgilanmagan bo'lishi mumkin) "
+            "ADMIN_USERNAMES=%s. Admin botga /start yozishi YOKI Render'da "
+            "ADMIN_ID raqamli qiymati o'rnatilishi kerak.",
+            config.ADMIN_IDS,
+            config.ADMIN_USERNAMES,
+        )
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -3156,11 +3200,17 @@ async def on_lang_choice(cb: CallbackQuery) -> None:
 # Handlers — Bot kanalga admin qilinganda (my_chat_member)
 # --------------------------------------------------------------------------- #
 async def notify_admins_channel(cid: int, added_by, chat, chat_id: int) -> None:
-    """Bot kanalga qo'shilganda adminlarga xabar yuboradi va ruxsat so'raydi."""
+    """Bot kanalga qo'shilganda adminlarga xabar yuboradi va ruxsat so'raydi.
+
+    Ishonchli yetkazish:
+      * ADMIN_ID o'rnatilmagan / admin botga /start yozmagan bo'lsa ham,
+        username bo'yicha qidiruv orqali admin ID topiladi (get_admin_ids).
+      * Har bir adminga yuborish natijasi logga yoziladi (yutib yuborilmaydi).
+      * Hech kimga yetib bormasa — so'rov YARATILGAN holicha qoladi va kanal
+        egasiga aniq yo'riqnoma yuboriladi.
+    """
     admin_ids = await get_admin_ids()
-    if not admin_ids:
-        log.warning("Admin ID topilmadi — kanal so'rovi yuborilmadi (id=%s).", cid)
-        return
+
     if added_by:
         uname = f"@{added_by.username}" if added_by.username else (added_by.first_name or "noma'lum")
         uid = added_by.id
@@ -3173,19 +3223,65 @@ async def notify_admins_channel(cid: int, added_by, chat, chat_id: int) -> None:
         f"👤 Qo'shgan: {esc(uname)}\n"
         f"🆔 Foydalanuvchi ID: `{uid}`\n"
         f"📣 Kanal: *{esc(chat.title or chat_id)}*{uname2}\n"
-        f"🆔 Kanal ID: `{chat_id}`\n\n"
+        f"🆔 Kanal ID: `{chat_id}`\n"
+        f"🔖 So'rov: `#{cid}`\n\n"
         "Bu kanalni botga ulashga ruxsat berasizmi?"
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Ruxsat berish", callback_data=f"admin:chan:ok:{cid}")
     kb.button(text="❌ Rad etish", callback_data=f"admin:chan:no:{cid}")
     kb.adjust(2)
+
+    delivered: list[int] = []
+    failed: list[tuple[int, str]] = []
     for admin_id in admin_ids:
         try:
             await bot.send_message(admin_id, text, reply_markup=kb.as_markup(),
                                    parse_mode="HTML")
+            delivered.append(admin_id)
+            log.info("Kanal so'rovi (#%s) adminga yuborildi: %s", cid, admin_id)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Adminga (%s) kanal so'rovi yuborilmadi: %s", admin_id, exc)
+            failed.append((admin_id, str(exc)))
+            log.error("Adminga (%s) kanal so'rovi YUBORILMADI: %s", admin_id, exc)
+
+    if not delivered:
+        # Hech bir adminga yetib bormadi — bu jimgina yo'qolmasin.
+        log.error(
+            "Kanal so'rovi (#%s) hech bir adminga yetib BORMADI. admin_ids=%s, "
+            "xatolar=%s. Sabab: ADMIN_ID o'rnatilmagan YOKI admin botga /start "
+            "yozmagan (Telegram botga birinchi bo'lib yozmagan odamga xabar "
+            "yuborishga ruxsat bermaydi).",
+            cid, admin_ids, failed,
+        )
+        # Kanal egasiga (qo'shgan foydalanuvchiga) aniq yo'riqnoma yuboramiz.
+        if added_by and added_by.id:
+            try:
+                await bot.send_message(
+                    added_by.id,
+                    "⚠️ *Kanal so'rovi adminga yetib bormadi*\n\n"
+                    f"📣 Kanal: *{esc(chat.title or chat_id)}*\n\n"
+                    "Sabab: bot admin bilan hali bog'lanmagan. Buni tuzatish uchun "
+                    "admin (egasi) botga kirib *bir marta* `/start` yozishi kerak — "
+                    "shundan keyin bot unga xabar yubora oladi.\n\n"
+                    "Shundan so'ng kanalni qayta ulang yoki qo'shishni qaytaring.",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("Kanal egasiga (%s) yo'riqnoma yuborilmadi: %s", uid, exc)
+        return
+
+    # So'rov muvaffaqiyatli yetkazildi — kanal egasiga ham javob beramiz.
+    if added_by and added_by.id:
+        try:
+            await bot.send_message(
+                added_by.id,
+                "⏳ *So'rov adminga yuborildi*\n\n"
+                f"📣 Kanal: *{esc(chat.title or chat_id)}*\n\n"
+                "Admin tasdiqlagach, kanal botga ulanadi va sizga xabar beraman.",
+                parse_mode="HTML",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Kanal egasiga tasdiq xabari yuborilmadi (%s): %s", uid, exc)
 
 
 @dp.my_chat_member()
@@ -3238,6 +3334,23 @@ async def on_admin_channel_decision(cb: CallbackQuery) -> None:
         )
         await db.set_pending_channel_status(cid, "approved", u.id)
         await cb.answer("Ruxsat berildi ✅")
+        # So'rov egasiga natijani xabar qilamiz.
+        if req.get("requested_by"):
+            try:
+                await bot.send_message(
+                    req["requested_by"],
+                    "✅ *Kanal botga ulandi!*\n\n"
+                    f"📣 {esc(req['title'] or req['channel_id'])}\n"
+                    f"🆔 `{req['channel_id']}`\n\n"
+                    "Admin so'rovingizni tasdiqladi. Endi kanaldan foydalanishingiz "
+                    "mumkin.",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Kanal egasiga (%s) tasdiq xabari yuborilmadi: %s",
+                    req["requested_by"], exc,
+                )
         try:
             await cb.message.edit_text(
                 f"✅ *Kanal botga ulandi!*\n\n"
@@ -3261,6 +3374,21 @@ async def on_admin_channel_decision(cb: CallbackQuery) -> None:
             await cb.message.edit_text(f"❌ Kanal so'rovi rad etildi (`{req['channel_id']}`).")
         except Exception:  # noqa: BLE001
             pass
+        # So'rov egasiga rad etilganini xabar qilamiz.
+        if req.get("requested_by"):
+            try:
+                await bot.send_message(
+                    req["requested_by"],
+                    "❌ *Kanal so'rovingiz rad etildi.*\n\n"
+                    f"📣 {esc(req['title'] or req['channel_id'])}\n"
+                    f"🆔 `{req['channel_id']}`",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Kanal egasiga (%s) rad xabari yuborilmadi: %s",
+                    req["requested_by"], exc,
+                )
 
 
 @dp.message(F.document)

@@ -1125,6 +1125,34 @@ class Database:
         rows = await cur.fetchall()
         return [int(r["user_id"]) for r in rows]
 
+    async def get_user_ids_by_usernames(self, usernames: list[str]) -> list[int]:
+        """Berilgan username(lar)ga mos foydalanuvchi ID larini topadi.
+
+        Adminni RAQAMLI ID bo'yicha aniqlash uchun ishlatiladi: ADMIN_ID
+        o'rnatilmagan bo'lsa ham, ADMIN_USERNAME orqali uning ID si topiladi
+        (foydalanuvchi botga kamida bir marta yozgan bo'lishi kerak).
+        """
+        if not usernames:
+            return []
+        found: set[int] = set()
+        for un in usernames:
+            un = (un or "").strip().lstrip("@")
+            if not un:
+                continue
+            for table in ("users", "admins"):
+                try:
+                    cur = await self.db.execute(
+                        f"SELECT user_id FROM {table} "
+                        "WHERE lower(username) = lower(?)",
+                        (un,),
+                    )
+                    for r in await cur.fetchall():
+                        found.add(int(r["user_id"]))
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("username qidiruv xato (%s): %s", table, exc)
+        found.discard(0)
+        return sorted(found)
+
     # ================================================================== #
     # v4: Savol qo'shish (IELTS Speaking / Writing)
     # ================================================================== #
