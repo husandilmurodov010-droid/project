@@ -290,6 +290,37 @@ CREATE TABLE IF NOT EXISTS user_contacts (
     created_at REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ucontact ON user_contacts(user_id);
+
+-- ===== v9: kanal postlari faolligi (reaksiyalar + ko'rishlar) =====
+
+CREATE TABLE IF NOT EXISTS post_engagement (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id       INTEGER NOT NULL,
+    message_id       INTEGER NOT NULL,
+    views            INTEGER,                 -- ko'rishlar (bo'lmasa NULL)
+    reactions        TEXT    DEFAULT '',      -- JSON: {"👍":12,"❤":5}
+    reactions_total  INTEGER,                 -- jami reaksiyalar
+    reactions_emojis INTEGER,                 -- nechta xil emoji
+    posted_at        REAL,                    -- post sanasi (unix)
+    source           TEXT    DEFAULT '',      -- 'preview' | 'update' | 'post'
+    updated_at       REAL    NOT NULL,
+    UNIQUE(channel_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_posteng ON post_engagement(channel_id, reactions_total);
+
+CREATE TABLE IF NOT EXISTS channel_engagement_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id      INTEGER NOT NULL,
+    score           REAL    NOT NULL,          -- rivojlanish darajasi (0-100)
+    reactions_total INTEGER DEFAULT 0,
+    reactions_avg   REAL    DEFAULT 0,         -- o'rtacha reaksiya / post
+    views_avg       REAL    DEFAULT 0,         -- o'rtacha ko'rish / post
+    views_total     INTEGER DEFAULT 0,
+    posts           INTEGER DEFAULT 0,
+    emoji_top       TEXT    DEFAULT '',        -- eng ko'p ishlatilgan emoji
+    taken_at        REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cheeng ON channel_engagement_snapshots(channel_id, taken_at);
 """
 
 
@@ -1355,6 +1386,119 @@ class Database:
             ),
         )
         await self.db.commit()
+
+    # ================================================================== #
+    # v9: kanal postlari faolligi — reaksiyalar va ko'rishlar
+    # ================================================================== #
+    async def upsert_post_engagement(
+        self,
+        channel_id: int,
+        message_id: int,
+        views: Optional[int] = None,
+        reactions_json: str = "",
+        reactions_total: Optional[int] = None,
+        reactions_emojis: Optional[int] = None,
+        posted_at: Optional[float] = None,
+        source: str = "",
+    ) -> None:
+        """Bitta kanal postining ko'rish va reaksiya ko'rsatkichlarini yozadi.
+
+        Faqat berilgan maydonlar yangilanadi (COALESCE) — masalan faqat
+        reaksiyalar kelganda ko'rishlar soni saqlanib qoladi.
+        """
+        await self.db.execute(
+            """
+            INSERT INTO post_engagement
+                (channel_id, message_id, views, reactions, reactions_total,
+                 reactions_emojis, posted_at, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(channel_id, message_id) DO UPDATE SET
+                views            = COALESCE(excluded.views, post_engagement.views),
+                reactions        = CASE WHEN excluded.reactions != ''
+                                        THEN excluded.reactions
+                                        ELSE post_engagement.reactions END,
+                reactions_total  = COALESCE(excluded.reactions_total, post_engagement.reactions_total),
+                reactions_emojis = COALESCE(excluded.reactions_emojis, post_engagement.reactions_emojis),
+                posted_at        = COALESCE(excluded.posted_at, post_engagement.posted_at),
+                source           = CASE WHEN excluded.source != ''
+                                        THEN excluded.source
+                                        ELSE post_engagement.source END,
+                updated_at       = excluded.updated_at
+            """,
+            (
+                int(channel_id), int(message_id), views, reactions_json or "",
+                reactions_total, reactions_emojis, posted_at, source or "",
+                time.time(),
+            ),
+        )
+        await self.db.commit()
+
+    async def list_post_engagement(
+        self, channel_id: int, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Kanal postlarining faollik ko'rsatkichlari (reaksiya bo'yicha kamayish)."""
+        cur = await self.db.execute(
+            "SELECT * FROM post_engagement WHERE channel_id = ? "
+            "ORDER BY COALESCE(reactions_total, 0) DESC, COALESCE(views, 0) DESC "
+            "LIMIT ?",
+            (int(channel_id), int(limit)),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def count_post_engagement(self, channel_id: int) -> int:
+        cur = await self.db.execute(
+            "SELECT COUNT(*) AS c FROM post_engagement WHERE channel_id = ?",
+            (int(channel_id),),
+        )
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def add_channel_engagement_snapshot(
+        self,
+        channel_id: int,
+        score: float,
+        reactions_total: int = 0,
+        reactions_avg: float = 0,
+        views_avg: float = 0,
+        views_total: int = 0,
+        posts: int = 0,
+        emoji_top: str = "",
+    ) -> None:
+        """Kanal faolligi (rivojlanish darajasi) ko'rsatkichlarini vaqt bo'yicha yozadi."""
+        await self.db.execute(
+            "INSERT INTO channel_engagement_snapshots "
+            "(channel_id, score, reactions_total, reactions_avg, views_avg, "
+            " views_total, posts, emoji_top, taken_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(channel_id), float(score), int(reactions_total),
+                float(reactions_avg), float(views_avg), int(views_total),
+                int(posts), emoji_top or "", time.time(),
+            ),
+        )
+        await self.db.commit()
+
+    async def get_channel_engagement(self, channel_id: int) -> dict[str, Any]:
+        """Oxirgi va oldingi faollik suratini qaytaradi (dinamika uchun)."""
+        cur = await self.db.execute(
+            "SELECT * FROM channel_engagement_snapshots WHERE channel_id = ? "
+            "ORDER BY taken_at DESC LIMIT 2",
+            (int(channel_id),),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if not rows:
+            return {"latest": None, "previous": None, "samples": 0}
+        cur2 = await self.db.execute(
+            "SELECT COUNT(*) AS c FROM channel_engagement_snapshots WHERE channel_id = ?",
+            (int(channel_id),),
+        )
+        crow = await cur2.fetchone()
+        return {
+            "latest": rows[0],
+            "previous": rows[1] if len(rows) > 1 else None,
+            "samples": int(crow["c"]) if crow else len(rows),
+        }
 
     # ================================================================== #
     # v6: kanal tasdiqlash oqimi (bot kanalga admin qilinganda)

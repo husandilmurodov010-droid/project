@@ -54,6 +54,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
+    MessageReactionCountUpdated,
+    MessageReactionUpdated,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     ChatMemberUpdated,
@@ -577,6 +579,10 @@ async def sub_gate_outer_middleware(handler, event, data):
     if (
         getattr(event, "my_chat_member", None) is not None
         or getattr(event, "chat_member", None) is not None
+        # v9: reaksiya hodisalari — bular foydalanuvchi "funksiyadan
+        # foydalanmoqda" hodisasi emas, balki kanal postidagi faollik.
+        or getattr(event, "message_reaction_count", None) is not None
+        or getattr(event, "message_reaction", None) is not None
     ):
         return await handler(event, data)
 
@@ -1874,33 +1880,270 @@ async def on_stats_chanadd(cb: CallbackQuery) -> None:
     )
 
 
-async def _channel_avg_views(channel_id: int) -> int | None:
-    """Kanal postlarining o'rtacha ko'rish sonini Telegram Bot API orqali oladi.
+# --------------------------------------------------------------------------- #
+# v9: kanal faolligi — reaksiyalar va ko'rishlar
+# --------------------------------------------------------------------------- #
+# MUHIM: Telegram BOT API'da ko'rishlar sonini beradigan metod YO'Q.
+# Ilgari ishlatilgan `getChatHistory` Bot API'ga umuman tegishli emas — u
+# 404 (Not Found) qaytaradi, shu sababli o'rtacha ko'rishlar hech qachon
+# ko'rinmasdi. Shuning uchun:
+#   * ko'rishlar va anonim reaksiyalar taqsimoti — kanalning ommaviy
+#     ko'rinishidan (t.me/s/<username>) o'qiladi;
+#   * reaksiya hodisalari (message_reaction_count) — Bot API orqali real
+#     vaqtda keladi (bot kanalda admin bo'lsa).
+# Ikkisi bitta manzilga (post_engagement) yoziladi.
+_PREVIEW_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+_K_SUFFIX = {"Y": 10 ** 24, "Z": 10 ** 21, "E": 10 ** 18, "P": 10 ** 15,
+             "T": 10 ** 12, "G": 10 ** 9, "M": 10 ** 6, "K": 10 ** 3}
 
-    Bot API ba'zi kanallarda ko'rishlar sonini bermaydi — o'shanda ``None``.
-    """
-    token = getattr(bot, "token", "") or ""
-    if not token:
+
+def _parse_short_count(raw: object) -> int | None:
+    """'1.2K', '177', '1 020', '2.5M' kabi qiymatlarni songa aylantiradi."""
+    if raw is None:
         return None
-    url = f"https://api.telegram.org/bot{token}/getChatHistory"
-    payload = {"chat_id": channel_id, "limit": 30, "offset": 0}
+    s = str(raw).strip().replace("\u202f", "").replace("\xa0", "")
+    s = s.replace(" ", "").replace(",", "")
+    if not s:
+        return None
+    m = re.match(r"^(\d+(?:[.,]\d+)?)([KkMmGgTtPpEeZzYy])?$", s)
+    if not m:
+        return None
     try:
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json()
-        if not data.get("ok"):
-            return None
-        views = [
-            int(m["views"]) for m in (data.get("result") or [])
-            if isinstance(m.get("views"), int)
-        ]
-        if not views:
-            return None
-        return round(sum(views) / len(views))
-    except Exception as exc:  # noqa: BLE001
-        log.debug("Ko'rishlar sonini olib bo'lmadi (%s): %s", channel_id, exc)
+        val = float(m.group(1).replace(",", "."))
+    except ValueError:
         return None
+    suffix = (m.group(2) or "").upper()
+    if suffix:
+        val *= _K_SUFFIX.get(suffix, 1)
+    return int(round(val))
+
+
+def parse_channel_preview(html_text: str) -> list[dict]:
+    """t.me/s/<kanal> HTML'idan postlar bo'yicha ko'rish va reaksiyalarni ajratadi.
+
+    Qaytaradi: har bir post uchun message_id, views, reactions (emoji -> soni),
+    total (jami reaksiya) va date (ISO satr).
+    """
+    out: list[dict] = []
+    for part in re.split(r'data-post="', html_text or "")[1:]:
+        head = part.split('"', 1)[0]
+        try:
+            mid = int(head.rsplit("/", 1)[-1])
+        except (ValueError, IndexError):
+            continue
+        vm = re.search(r"tgme_widget_message_views[^>]*>([^<]+)<", part)
+        views = _parse_short_count(vm.group(1)) if vm else None
+        reactions: dict[str, int] = {}
+        for rm in re.finditer(r'<span class="tgme_reaction[^"]*">(.*?)</span>', part, re.S):
+            seg = rm.group(1)
+            em = re.search(r"<b>([^<]+)</b>", seg)
+            if not em:
+                continue
+            emoji = em.group(1).strip()
+            tail = seg.rsplit("</i>", 1)[-1]
+            cm = re.search(r"(\d[\d\s\u202f]*)", tail)
+            cnt = _parse_short_count(cm.group(1)) if cm else 0
+            reactions[emoji] = reactions.get(emoji, 0) + (cnt or 0)
+        dm = re.search(r'<time datetime="([^"]+)"', part)
+        out.append({
+            "message_id": mid,
+            "views": views,
+            "reactions": reactions,
+            "total": sum(reactions.values()),
+            "date": dm.group(1) if dm else None,
+        })
+    return out
+
+
+async def _fetch_preview_html(username: str) -> str | None:
+    """Kanalning ommaviy ko'rinishini (t.me/s/) yuklab oladi."""
+    url = f"https://t.me/s/{username.lstrip('@')}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=12)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"User-Agent": _PREVIEW_UA}) as resp:
+                if resp.status != 200:
+                    log.warning("Kanal ko'rinishi olinmadi (%s): HTTP %s", url, resp.status)
+                    return None
+                return await resp.text()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Kanal ko'rinishini yuklab bo'lmadi (%s): %s", url, exc)
+        return None
+
+
+def _emoji_breakdown(reactions_json: str) -> dict[str, int]:
+    """Saqlangan JSON'dan emoji taqsimotini qaytaradi."""
+    if not reactions_json:
+        return {}
+    try:
+        data = json.loads(reactions_json)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float))}
+
+
+async def _channel_username(channel_id: int) -> str | None:
+    """Kanal @username'ini bazadan yoki getChat orqali aniqlaydi."""
+    try:
+        row = await db.get_channel(channel_id)
+        if row and row.get("username"):
+            return str(row["username"]).lstrip("@")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Kanal yozuvini o'qib bo'lmadi (%s): %s", channel_id, exc)
+    try:
+        chat = await bot.get_chat(channel_id)
+        uname = getattr(chat, "username", None)
+        if uname:
+            return str(uname).lstrip("@")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Kanal username'ini olib bo'lmadi (%s): %s", channel_id, exc)
+    return None
+
+
+async def collect_channel_engagement(channel_id: int) -> dict:
+    """Kanal postlari faolligini yig'adi (ko'rishlar + reaksiyalar) va bazaga yozadi.
+
+    Qaytaradi: {'ok': bool, 'posts': [...], 'error': str | None}
+    Xato bo'lsa logga yoziladi va foydalanuvchiga tushunarli sabab qaytariladi.
+    """
+    uname = await _channel_username(channel_id)
+    if not uname:
+        log.warning("Kanal %s uchun username topilmadi — faollikni yig'ib bo'lmadi.",
+                    channel_id)
+        return {"ok": False, "posts": [], "error": "username_yoq"}
+    html_text = await _fetch_preview_html(uname)
+    if not html_text:
+        log.warning("Kanal %s (@%s) ko'rinishini olib bo'lmadi.", channel_id, uname)
+        return {"ok": False, "posts": [], "error": "kanal_ochiq_emas"}
+    parsed = parse_channel_preview(html_text)
+    if not parsed:
+        log.info("Kanal %s (@%s) ko'rinishida post topilmadi.", channel_id, uname)
+    for p in parsed:
+        posted = None
+        if p.get("date"):
+            try:
+                posted = datetime.fromisoformat(p["date"]).timestamp()
+            except (ValueError, TypeError):
+                posted = None
+        try:
+            await db.upsert_post_engagement(
+                channel_id=channel_id,
+                message_id=p["message_id"],
+                views=p.get("views"),
+                reactions_json=json.dumps(p.get("reactions") or {}, ensure_ascii=False),
+                reactions_total=p.get("total", 0),
+                reactions_emojis=len(p.get("reactions") or {}),
+                posted_at=posted,
+                source="preview",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("Post faolligi yozilmadi (%s/%s): %s",
+                      channel_id, p.get("message_id"), exc)
+    return {"ok": True, "posts": parsed, "error": None}
+
+
+def _engagement_totals(posts: list[dict]) -> dict:
+    """Postlar ro'yxatidan umumiy ko'rsatkichlarni hisoblaydi."""
+    rows = list(posts or [])
+    n = len(rows)
+    emoji_sum: dict[str, int] = {}
+    for r in rows:
+        for k, v in _emoji_breakdown(r.get("reactions") or "").items():
+            emoji_sum[k] = emoji_sum.get(k, 0) + int(v)
+    react_total = sum(int(r.get("reactions_total") or 0) for r in rows)
+    views_vals = [int(r["views"]) for r in rows if r.get("views") is not None]
+    top = None
+    for r in rows:
+        t = int(r.get("reactions_total") or 0)
+        if t > 0 and (top is None or t > int(top.get("reactions_total") or 0)):
+            top = r
+    return {
+        "posts": n,
+        "react_total": react_total,
+        "react_avg": (react_total / n) if n else 0.0,
+        "emoji": emoji_sum,
+        "emoji_top": (max(emoji_sum.items(), key=lambda kv: kv[1])[0] if emoji_sum else ""),
+        "views_avg": (sum(views_vals) / len(views_vals)) if views_vals else 0.0,
+        "views_total": sum(views_vals),
+        "views_posts": len(views_vals),
+        "top_post": top,
+    }
+
+
+def engagement_score(t: dict, members: int) -> float:
+    """Kanallar guruhiga nisbatan 0-100 rivojlanish darajasini hisoblaydi."""
+    # Ma'lumot umuman bo'lmasa (post ham, reaksiya ham yo'q) — ball 0.
+    if not t.get("posts") and not t.get("react_total"):
+        return 0.0
+    views_score = min(t["views_avg"] / 1000.0, 1.0) if t["views_avg"] else 0.0
+    react_per_k = (t["react_avg"] / (members / 1000.0)) if members and t["react_avg"] else 0.0
+    react_score = min(react_per_k / 50.0, 1.0)
+    if t["posts"] < 3:
+        freshness = 0.5
+    elif t["views_avg"] and t["views_avg"] < 50:
+        freshness = 0.3
+    else:
+        freshness = 1.0
+    score = 100.0 * (0.40 * views_score + 0.40 * react_score + 0.20 * freshness)
+    return round(min(max(score, 0.0), 100.0), 1)
+
+
+def score_label(score: float) -> str:
+    """Ballni o'qiladigan daraja nomiga aylantiradi."""
+    if score >= 75:
+        return "juda yuqori"
+    if score >= 50:
+        return "yuqori"
+    if score >= 25:
+        return "o'rtacha"
+    return "past"
+
+
+def _fmt_emoji(dist: dict[str, int], limit: int = 6) -> str:
+    """Emoji taqsimotini '👍 10 · ❤ 5' ko'rinishida chiqaradi."""
+    if not dist:
+        return "yo'q"
+    items = sorted(dist.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return " · ".join(f"{k} {v}" for k, v in items)
+
+
+def _trend_str(cur_val: float, prev_val: float | None) -> str:
+    """Ikki surat orasidagi o'zgarishni ko'rsatadi."""
+    if prev_val is None:
+        return "—"
+    diff = cur_val - prev_val
+    if abs(diff) < 0.05:
+        return "→ o'zgarmagan"
+    return f"↑ +{diff:.1f}" if diff > 0 else f"↓ {diff:.1f}"
+
+
+async def _channel_engagement_stats(cid: int) -> dict:
+    """Kanal faolligini yig'ib, ko'rsatkichlar to'plamini qaytaradi.
+
+    Yig'ish muvaffaqiyatsiz bo'lsa ham bazadagi mavjud ma'lumotdan foydalanadi.
+    """
+    collect_err: str | None = None
+    fetched = 0
+    try:
+        res = await collect_channel_engagement(cid)
+        if res.get("ok"):
+            fetched = len(res.get("posts") or [])
+        else:
+            collect_err = res.get("error")
+    except Exception as exc:  # noqa: BLE001
+        log.error("Faollikni yig'ishda xato (%s): %s", cid, exc)
+        collect_err = "xato"
+    try:
+        posts = await db.list_post_engagement(cid)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Faollik yozuvlarini o'qib bo'lmadi (%s): %s", cid, exc)
+        posts = []
+    totals = _engagement_totals(posts)
+    totals["fetched"] = fetched
+    totals["collect_err"] = collect_err
+    return totals
 
 
 async def _build_channels_stats(rows: list) -> list[str]:
@@ -1908,8 +2151,13 @@ async def _build_channels_stats(rows: list) -> list[str]:
 
     6-talab: a'zolar sonidan tashqari rivojlanish darajasi (24s / 7 kun / jami
     o'sish), postlar holati va o'rtacha ko'rishlar ham ko'rsatiladi.
+
+    v9 (yangi): reaksiyalar bo'limi — har bir post uchun jami reaksiyalar va
+    emoji taqsimoti, kanal bo'yicha umumiy reaksiya statistikasi (o'rtacha
+    reaksiya/post, eng ko'p reaksiya olgan post) hamda o'rtacha ko'rishlar.
     """
     lines = ["📈 *Kanallar statistikasi*\n"]
+    prepared: list[dict] = []
     for r in rows:
         cid = r["channel_id"]
         posts = await db.count_channel_posts(cid)
@@ -1920,38 +2168,127 @@ async def _build_channels_stats(rows: list) -> list[str]:
             members_n = int(await bot.get_chat_member_count(cid))
             members = str(members_n)
         except Exception as exc:  # noqa: BLE001
-            log.debug("A'zolar sonini olib bo'lmadi (%s): %s", cid, exc)
+            log.warning("A'zolar sonini olib bo'lmadi (%s): %s", cid, exc)
         # Rivojlanish darajasini hisoblash uchun oniy suratga olamiz
         if members_n is not None:
             try:
                 await db.record_channel_snapshot(cid, members_n)
             except Exception:  # noqa: BLE001
                 log.debug("Kanal surati yozilmadi (%s)", cid)
-
-        uname = f" (@{r['username']})" if r["username"] else ""
-        lines.append(
-            f"• *{esc(r['title'] or cid)}*{uname}\n"
-            f"  🆔 `{cid}`\n"
-            f"  👥 A'zolar: *{members}* · 📨 Postlar: *{posts}* "
-            f"(yuborilgan: *{sent}*, kutilayotgan: *{max(0, posts - sent)}*)"
-        )
         try:
             growth = await db.get_channel_growth(cid)
         except Exception:  # noqa: BLE001
             growth = {}
+        totals = await _channel_engagement_stats(cid)
+        prepared.append({
+            "row": r, "cid": cid, "posts": posts, "sent": sent,
+            "members": members, "members_n": members_n,
+            "growth": growth, "totals": totals,
+        })
+
+    # Rivojlanish darajasi — kanallar guruhiga nisbatan bir xil shkalada
+    # (bir foydalanuvchi bir vaqtda bir nechta kanalni ulashi mumkin).
+    base_members = max(
+        (p["members_n"] or 0) for p in prepared
+    ) or 0
+    for p in prepared:
+        t = p["totals"]
+        scale_members = p["members_n"] or base_members
+        p["score"] = engagement_score(t, scale_members or 0)
+        try:
+            await db.add_channel_engagement_snapshot(
+                p["cid"], p["score"], t["react_total"], t["react_avg"],
+                t["views_avg"], t["views_total"], t["posts"], t["emoji_top"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Faollik surati yozilmadi (%s): %s", p["cid"], exc)
+
+    for idx, p in enumerate(prepared, start=1):
+        r, cid = p["row"], p["cid"]
+        uname = f" (@{r['username']})" if r.get("username") else ""
+        plain_uname = (r.get("username") or "").lstrip("@")
+        growth = p["growth"] or {}
+        t = p["totals"]
+
+        lines.append(
+            f"*{idx}. {esc(r['title'] or cid)}*{uname}\n"
+            f"  🆔 `{cid}`\n"
+            f"  👥 A'zolar: *{p['members']}* · 📨 Postlar: *{p['posts']}* "
+            f"(yuborilgan: *{p['sent']}*, kutilayotgan: *{max(0, p['posts'] - p['sent'])}*)"
+        )
         if growth:
-            def _fmt(d: int) -> str:
+            def _gfmt(d: int) -> str:
                 return f"+{d}" if d > 0 else str(d)
 
             lines.append(
-                f"  📊 O'sish: 24 soat *{_fmt(growth['growth_24h'])}* · "
-                f"7 kun *{_fmt(growth['growth_7d'])}* · "
-                f"jami *{_fmt(growth['growth_total'])}*"
+                f"  📊 O'sish: 24 soat *{_gfmt(growth['growth_24h'])}* · "
+                f"7 kun *{_gfmt(growth['growth_7d'])}* · "
+                f"jami *{_gfmt(growth['growth_total'])}*"
             )
-        if sent:
-            views = await _channel_avg_views(cid)
-            if views is not None:
-                lines.append(f"  👁 O'rtacha ko'rishlar (post): *{views}*")
+
+        # --- Rivojlanish darajasi ---
+        score = p["score"]
+        lines.append(
+            f"  🚀 Rivojlanish darajasi: *{score}/100* ({score_label(score)})"
+        )
+
+        # --- Reaksiyalar (v9) ---
+        if t["posts"]:
+            lines.append(
+                f"  👍 Reaksiyalar: jami *{t['react_total']}* · "
+                f"o'rtacha/post *{t['react_avg']:.1f}* · "
+                f"xil emoji *{len(t['emoji'])}*"
+            )
+            if t["emoji"]:
+                lines.append(f"     {_fmt_emoji(t['emoji'])}")
+            else:
+                lines.append("     ℹ️ Hozircha reaksiya yo'q")
+            top = t["top_post"]
+            if top:
+                link = (f"https://t.me/{plain_uname}/{top['message_id']}"
+                        if plain_uname else "")
+                tag = f"[post #{top['message_id']}]({link})" if link else f"post #{top['message_id']}"
+                lines.append(
+                    f"     🏆 Eng ko'p reaksiya olgan: {tag} — "
+                    f"*{int(top.get('reactions_total') or 0)}* ta"
+                )
+            if t["views_posts"]:
+                lines.append(
+                    f"     👁 O'rtacha ko'rish/post: *{t['views_avg']:.0f}* · "
+                    f"jami *{t['views_total']}*"
+                )
+            eng = await db.get_channel_engagement(cid)
+            if eng.get("latest") and eng.get("previous"):
+                lines.append(
+                    f"     📈 Dinamika: reaksiya/post *{_trend_str(t['react_avg'], eng['previous']['reactions_avg'])}* · "
+                    f"ko'rish/post *{_trend_str(t['views_avg'], eng['previous']['views_avg'])}*"
+                )
+        else:
+            lines.append(
+                "  👍 Reaksiyalar: hozircha ma'lumot yo'q\n"
+                "     ℹ️ Ma'lumot post joylangach (yoki kanal ochiq bo'lgach) to'planadi"
+            )
+
+        # --- Yig'ishdagi muammo haqida tushunarli ogohlantirish ---
+        if t.get("collect_err") == "kanal_ochiq_emas":
+            lines.append(
+                "  ⚠️ Faollik ma'lumotini olib bo'lmadi: kanal ommaviy ko'rinishda "
+                "emas (yopiq). Ko'rish/reaksiya statistikasi ko'rinmasligi mumkin."
+            )
+        elif t.get("collect_err") == "username_yoq":
+            lines.append(
+                "  ⚠️ Kanalda @username yo'q — ko'rish/reaksiya statistikasi "
+                "to'planmaydi."
+            )
+        elif t.get("collect_err") == "xato":
+            lines.append(
+                "  ⚠️ Faollik ma'lumotini yig'ishda xatolik yuz berdi (logga yozildi)."
+            )
+
+        # --- Postlar holati ---
+        if t["posts"]:
+            lines.append(f"  📦 Tahlil qilingan postlar: *{t['posts']}* ta")
+        lines.append("")
     return lines
 
 
@@ -1965,6 +2302,94 @@ async def on_menu_chanstats(cb: CallbackQuery) -> None:
         return
     lines = await _build_channels_stats(rows)
     await _edit(cb, "\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# v9: real vaqtdagi reaksiya hodisalari (Telegram Bot API)
+# --------------------------------------------------------------------------- #
+@dp.message_reaction_count()
+async def on_message_reaction_count(ev: MessageReactionCountUpdated) -> None:
+    """Anonim reaksiyalar soni o'zgarganda kanal posti statistikasini yangilaydi.
+
+    Bot kanalda admin bo'lishi va "message_reaction_count" allowed_updates'da
+    bo'lishi kerak (dispatcher buni o'zi ro'yxatga oladi).
+    """
+    try:
+        chat_id = int(ev.chat.id)
+        dist: dict[str, int] = {}
+        total = 0
+        for rc in (ev.reactions or []):
+            cnt = int(getattr(rc, "total_count", 0) or 0)
+            rtype = getattr(rc, "type", None)
+            emoji = getattr(rtype, "emoji", None) if rtype is not None else None
+            key = emoji or "custom"
+            dist[key] = dist.get(key, 0) + cnt
+            total += cnt
+        posted_at = None
+        if getattr(ev, "date", None) is not None:
+            try:
+                posted_at = float(ev.date.timestamp())
+            except Exception:  # noqa: BLE001
+                posted_at = None
+        await db.upsert_post_engagement(
+            channel_id=chat_id,
+            message_id=int(ev.message_id),
+            reactions_json=json.dumps(dist, ensure_ascii=False),
+            reactions_total=total,
+            reactions_emojis=len(dist),
+            posted_at=posted_at,
+            source="update",
+        )
+        log.info("Reaksiyalar yangilandi: kanal=%s post=%s jami=%s",
+                 chat_id, ev.message_id, total)
+    except Exception as exc:  # noqa: BLE001
+        log.error("message_reaction_count yozilmadi: %s", exc)
+
+
+@dp.message_reaction()
+async def on_message_reaction(ev: MessageReactionUpdated) -> None:
+    """Bitta foydalanuvchi reaksiyasi o'zgarganda logga yozadi (diagnostika)."""
+    try:
+        log.info(
+            "Reaksiya o'zgardi: chat=%s post=%s user=%s yangi=%s eski=%s",
+            getattr(ev.chat, "id", "?"), getattr(ev, "message_id", "?"),
+            getattr(getattr(ev, "user", None), "id", "?"),
+            [getattr(t, "emoji", None) for t in (ev.new_reaction or [])],
+            [getattr(t, "emoji", None) for t in (ev.old_reaction or [])],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("message_reaction qayta ishlanmadi: %s", exc)
+
+
+async def engagement_loop() -> None:
+    """Kanal faolligini (ko'rishlar + reaksiyalar) davriy yig'ib boradi."""
+    log.info("Kanal faolligi fon vazifasi ishga tushdi (har %ss).",
+             config.ENGAGEMENT_CHECK_INTERVAL)
+    while True:
+        try:
+            rows = await db.list_channels()
+            for r in rows:
+                try:
+                    res = await collect_channel_engagement(r["channel_id"])
+                    if not res.get("ok"):
+                        continue
+                    posts = await db.list_post_engagement(r["channel_id"])
+                    t = _engagement_totals(posts)
+                    try:
+                        members = int(await bot.get_chat_member_count(r["channel_id"]))
+                    except Exception:  # noqa: BLE001
+                        members = 0
+                    await db.add_channel_engagement_snapshot(
+                        r["channel_id"], engagement_score(t, members),
+                        t["react_total"], t["react_avg"], t["views_avg"],
+                        t["views_total"], t["posts"], t["emoji_top"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Kanal %s faolligi yig'ilmadi: %s",
+                                r.get("channel_id"), exc)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Faollik tsiklida xato: %s", exc)
+        await asyncio.sleep(config.ENGAGEMENT_CHECK_INTERVAL)
 
 
 @dp.callback_query(F.data == "stats:chanstats")
@@ -4187,6 +4612,8 @@ async def main() -> None:
     # --- 5) Fon vazifalari ---
     tasks = [asyncio.create_task(reminder_loop(), name="reminders")]
     tasks.append(asyncio.create_task(post_loop(), name="channel_posts"))
+    # v9: kanal faolligi (reaksiyalar + ko'rishlar) davriy yig'iladi.
+    tasks.append(asyncio.create_task(engagement_loop(), name="channel_engagement"))
 
     if backup_mgr.enabled:
         tasks.append(asyncio.create_task(backup_mgr.loop(), name="backup"))

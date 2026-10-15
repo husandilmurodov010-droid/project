@@ -108,6 +108,11 @@ DEFAULT_CHANNEL_ID = os.getenv("DEFAULT_CHANNEL_ID", "").strip()
 # Rejalashtirilgan postlarni tekshirish oralig'i (sekund).
 POST_CHECK_INTERVAL = int(os.getenv("POST_CHECK_INTERVAL", "30"))
 
+# --- Kanal faolligi (reaksiyalar + ko'rishlar) ---
+# Fon vazifasi kanal postlarining ko'rish va reaksiya ko'rsatkichlarini
+# qanchalik tez-tez yig'ib borishini belgilaydi (sekund).
+ENGAGEMENT_CHECK_INTERVAL = int(os.getenv("ENGAGEMENT_CHECK_INTERVAL", "900"))
+
 # --- PDF testlar ---
 # PDF dan matn ajratib olish uchun maksimal fayl hajmi (MB).
 PDF_MAX_MB = int(os.getenv("PDF_MAX_MB", "20"))
