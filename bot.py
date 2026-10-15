@@ -30,6 +30,7 @@ Arxitektura:
 """
 from __future__ import annotations
 
+import aiohttp
 import asyncio
 import html
 import json
@@ -384,6 +385,30 @@ def main_reply_kb() -> ReplyKeyboardMarkup:
     )
 
 
+# --- Test tugagach: kontakt ulashish (2-talab) ---
+CONTACT_BTN = "📱 Telefon raqamim"
+CONTACT_RE = re.compile(r"kontakt|aloqa|bog['’]lanish", re.IGNORECASE)
+
+
+def contact_reply_kb() -> ReplyKeyboardMarkup:
+    """Test tugagach ko'rsatiladigan vaqtinchalik kontakt ulashish klaviaturasi."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=CONTACT_BTN, request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def contact_ask_text(title: str) -> str:
+    """Test nomi bilan birga kontakt so'raydigan matn."""
+    return (
+        f"📄 *{esc(title)}*\n\n"
+        "📱 *Bog'lanish uchun kontaktingizni ulashishni xohlaysizmi?*\n"
+        "Quyidagi «📱 Telefon raqamim» tugmasini bosing yoki telefon "
+        "raqamingizni yozib yuboring — mutaxassis siz bilan bog'lanadi."
+    )
+
+
 # --- Majburiy kanal (subscription gate) ---
 def sub_gate_kb() -> InlineKeyboardMarkup:
     """Obuna bo'lmagan foydalanuvchiga ko'rsatiladigan klaviatura.
@@ -724,7 +749,10 @@ def main_menu_kb(is_admin: bool = False):
         kb.button(text="📊 Statistika", callback_data="menu:stats")
         kb.adjust(1, 2, 2, 1, 1, 1, 1, 1, 1)
     else:
-        kb.adjust(1, 2, 2, 1, 1, 1, 1)
+        # 4-talab: oddiy foydalanuvchiga admin statistikasi o'rniga faqat
+        # umumiy kanal statistikasi ko'rinadi.
+        kb.button(text="📈 Kanal statistikasi", callback_data="menu:chanstats")
+        kb.adjust(1, 2, 2, 1, 1, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -1530,21 +1558,74 @@ async def on_sub_noaccess(cb: CallbackQuery) -> None:
 async def on_menu_reset(cb: CallbackQuery) -> None:
     """Suhbat tarixini tozalab, yangi suhbat boshlaydi."""
     await cb.answer("Suhbat tozalandi")
-    await _reset_my_conversation(cb.from_user.id)
+    # 3-talab: suhbat HAR IKKI tomondan tozalanadi (chat_history + user_states)
+    n = await _reset_my_conversation(cb.from_user.id)
     try:
         await _edit(cb, 
-            "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
-            "gaplarni eslab qolmaydi.\n\n🏠 *Asosiy menyu* — bo'limni tanlang:",
+            "🔄 *Suhbat tozalandi.* Eski suhbat ham, bot xotirasi ham tozalandi "
+            f"({n} ta qatlam o'chirildi).\n\n"
+            "▶️ Yangi suhbatni boshlash uchun /start ni yuboring.\n\n"
+            "🏠 *Asosiy menyu* — bo'limni tanlang:",
             reply_markup=_menu_kb_for(cb.from_user),
         )
     except Exception:  # noqa: BLE001
         await _ans(cb.message, 
-            "🔄 Suhbat tozalandi. Yangi suhbat boshlandi.",
+            "🔄 Suhbat tozalandi. Yangi suhbatni /start bilan boshlang.",
             reply_markup=_menu_kb_for(cb.from_user),
         )
     # Tozalashdan keyin «⬅️ Orqaga» o'chirilgan ekranga qaytmasligi uchun
     # navigatsiya tarixini ham tozalaymiz (faqat shu foydalanuvchi uchun).
     _nav_stack.pop(cb.from_user.id, None)
+
+
+# --------------------------------------------------------------------------- #
+# 2-talab: kontakt (telefon) qabul qilish
+# --------------------------------------------------------------------------- #
+async def _save_contact_and_ack(message: Message, phone: str, name: str = "") -> None:
+    """Kontaktni bazaga yozib, foydalanuvchiga tasdiq yuboradi."""
+    u = message.from_user
+    try:
+        await db.add_user_contact(
+            u.id, phone=phone, first_name=name or (u.first_name or ""),
+            username=u.username or "",
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("Kontaktni saqlashda xato (user=%s)", u.id)
+    await db.clear_user_state(u.id)
+    await _ans(message,
+        "✅ *Rahmat!* Kontaktingiz qabul qilindi.\n\n"
+        "Mutaxassis tez orada siz bilan bog'lanadi.",
+        reply_markup=main_reply_kb(),
+    )
+
+
+@dp.message(F.contact)
+async def on_contact(message: Message) -> None:
+    """📱 «Kontakt ulashish» tugmasi bosilganda ishlaydi (2-talab)."""
+    c = message.contact
+    if c is None:
+        return
+    name = " ".join(x for x in [c.first_name, c.last_name] if x)
+    await _save_contact_and_ack(message, c.phone_number or "", name=name)
+
+
+async def handle_contact_text(message: Message, text: str) -> bool:
+    """Kontakt kutilayotganda yozilgan matnni qayta ishlaydi.
+
+    ``True`` — raqam saqlandi; ``False`` — kontakt emas, odatdagi oqimga
+    qaytish kerak."""
+    raw = (text or "").strip()
+    phone = re.sub(r"[^0-9+]", "", raw)
+    if len(phone) >= 7 and re.fullmatch(r"[+0-9\s()\-]+", raw):
+        await _save_contact_and_ack(message, phone)
+        return True
+    # Kontakt emas — holatni tozalab, odatdagi oqimga qaytaramiz
+    await message.answer(
+        "📱 Telefon raqamingizni yuboring yoki «📱 Kontakt ulashish» "
+        "tugmasini bosing.",
+        reply_markup=contact_reply_kb(),
+    )
+    return False
 
 
 @dp.message(Command("lang"))
@@ -1792,9 +1873,102 @@ async def on_stats_chanadd(cb: CallbackQuery) -> None:
     )
 
 
+async def _channel_avg_views(channel_id: int) -> int | None:
+    """Kanal postlarining o'rtacha ko'rish sonini Telegram Bot API orqali oladi.
+
+    Bot API ba'zi kanallarda ko'rishlar sonini bermaydi — o'shanda ``None``.
+    """
+    token = getattr(bot, "token", "") or ""
+    if not token:
+        return None
+    url = f"https://api.telegram.org/bot{token}/getChatHistory"
+    payload = {"chat_id": channel_id, "limit": 30, "offset": 0}
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json()
+        if not data.get("ok"):
+            return None
+        views = [
+            int(m["views"]) for m in (data.get("result") or [])
+            if isinstance(m.get("views"), int)
+        ]
+        if not views:
+            return None
+        return round(sum(views) / len(views))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Ko'rishlar sonini olib bo'lmadi (%s): %s", channel_id, exc)
+        return None
+
+
+async def _build_channels_stats(rows: list) -> list[str]:
+    """Kanal statistikasi matnini tayyorlaydi.
+
+    6-talab: a'zolar sonidan tashqari rivojlanish darajasi (24s / 7 kun / jami
+    o'sish), postlar holati va o'rtacha ko'rishlar ham ko'rsatiladi.
+    """
+    lines = ["📈 *Kanallar statistikasi*\n"]
+    for r in rows:
+        cid = r["channel_id"]
+        posts = await db.count_channel_posts(cid)
+        sent = await db.count_channel_posts(cid, sent_only=True)
+        members = "—"
+        members_n: int | None = None
+        try:
+            members_n = int(await bot.get_chat_member_count(cid))
+            members = str(members_n)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("A'zolar sonini olib bo'lmadi (%s): %s", cid, exc)
+        # Rivojlanish darajasini hisoblash uchun oniy suratga olamiz
+        if members_n is not None:
+            try:
+                await db.record_channel_snapshot(cid, members_n)
+            except Exception:  # noqa: BLE001
+                log.debug("Kanal surati yozilmadi (%s)", cid)
+
+        uname = f" (@{r['username']})" if r["username"] else ""
+        lines.append(
+            f"• *{esc(r['title'] or cid)}*{uname}\n"
+            f"  🆔 `{cid}`\n"
+            f"  👥 A'zolar: *{members}* · 📨 Postlar: *{posts}* "
+            f"(yuborilgan: *{sent}*, kutilayotgan: *{max(0, posts - sent)}*)"
+        )
+        try:
+            growth = await db.get_channel_growth(cid)
+        except Exception:  # noqa: BLE001
+            growth = {}
+        if growth:
+            def _fmt(d: int) -> str:
+                return f"+{d}" if d > 0 else str(d)
+
+            lines.append(
+                f"  📊 O'sish: 24 soat *{_fmt(growth['growth_24h'])}* · "
+                f"7 kun *{_fmt(growth['growth_7d'])}* · "
+                f"jami *{_fmt(growth['growth_total'])}*"
+            )
+        if sent:
+            views = await _channel_avg_views(cid)
+            if views is not None:
+                lines.append(f"  👁 O'rtacha ko'rishlar (post): *{views}*")
+    return lines
+
+
+@dp.callback_query(F.data == "menu:chanstats")
+async def on_menu_chanstats(cb: CallbackQuery) -> None:
+    """📈 Umumiy kanal statistikasi — BARCHA foydalanuvchilar uchun (4-talab)."""
+    await cb.answer()
+    rows = await db.list_channels()
+    if not rows:
+        await _edit(cb, "📈 *Kanal statistikasi*\n\nHozircha kanal ulanmagan.")
+        return
+    lines = await _build_channels_stats(rows)
+    await _edit(cb, "\n".join(lines))
+
+
 @dp.callback_query(F.data == "stats:chanstats")
 async def on_stats_chanstats(cb: CallbackQuery) -> None:
-    """Qo'shilgan kanallar statistikasi: a'zolar soni, postlar soni."""
+    """Kanallar statistikasi (admin): a'zolar, o'sish, postlar, ko'rishlar."""
     u = cb.from_user
     await cb.answer()
     if not config.is_admin(u.id, u.username):
@@ -1807,23 +1981,10 @@ async def on_stats_chanstats(cb: CallbackQuery) -> None:
             reply_markup=stats_admin_kb(),
         )
         return
-    lines = ["📈 *Kanallar statistikasi*\n"]
-    for r in rows:
-        cid = r["channel_id"]
-        posts = await db.count_channel_posts(cid)
-        sent = await db.count_channel_posts(cid, sent_only=True)
-        members = "—"
-        try:
-            members = str(await bot.get_chat_member_count(cid))
-        except Exception as exc:  # noqa: BLE001
-            log.debug("A'zolar sonini olib bo'lmadi (%s): %s", cid, exc)
-        uname = f" (@{r['username']})" if r["username"] else ""
-        lines.append(
-            f"• *{esc(r['title'] or cid)}*{uname}\n"
-            f"  🆔 `{cid}`\n"
-            f"  👥 A'zolar: *{members}* · 📨 Postlar: *{posts}* (yuborilgan: *{sent}*)"
-        )
-    await _edit(cb, "\n".join(lines), reply_markup=stats_admin_kb())
+    lines = await _build_channels_stats(rows)
+    # 5-talab: bu yerda `stats_admin_kb()` qayta berilmaydi — aks holda
+    # «Kanallar statistikasi» tugmasi ichma-ich qayta chiqib ketardi.
+    await _edit(cb, "\n".join(lines))
 
 
 # --------------------------------------------------------------------------- #
@@ -2197,9 +2358,11 @@ async def handle_test_add(message: Message, state: dict, text: str) -> None:
             await db.add_test(subject, code, data["title"], data["questions"],
                               answers, created_by=u.id)
             await db.clear_user_state(user_id)
+            uname = f"@{u.username}" if u.username else (u.first_name or "noma'lum")
             await _ans(message, 
                 f"✅ Test bazaga qo'shildi!\n\n"
                 f"🔑 Kod: `{code}`\n📄 {esc(data['title'])}\n"
+                f"👤 Muallif: {esc(uname)} (ID: `{u.id}`)\n"
                 f"❓ Savollar: {n} ta\n\n"
                 f"Endi `{code}` kodini yuborib testni boshlash mumkin."
             )
@@ -2313,7 +2476,7 @@ async def notify_admins_approval(aid: int, user, subject: str, payload: dict) ->
         return
 
     name = "Matematika" if subject == "math" else "Fizika"
-    uname = f"@{user.username}" if user.username else user.first_name
+    uname = f"@{user.username}" if user.username else (user.first_name or "noma'lum")
     qs = payload["questions"]
     preview = "\n".join(f"{i+1}. {q['q']}" for i, q in enumerate(qs[:5]))
     if len(qs) > 5:
@@ -2325,7 +2488,8 @@ async def notify_admins_approval(aid: int, user, subject: str, payload: dict) ->
         f"📚 Fan: *{name}*\n"
         f"📄 Sarlavha: {esc(payload['title'])}\n"
         f"❓ Savollar: {len(qs)} ta\n"
-        f"🔑 Javoblar: `{payload['answers']}`\n\n"
+        f"🔑 Javoblar: `{payload['answers']}`\n"
+        f"ℹ️ Username bo'lmasa, {esc(uname)} (ID: `{user.id}`) orqali bog'laning.\n\n"
         f"{esc(preview)}"
     )
     kb = InlineKeyboardBuilder()
@@ -2487,6 +2651,11 @@ async def handle_test_answers(message: Message, state: dict, text: str) -> None:
     if analysis:
         await _safe_send(message, "🤖 *Tahlil va tavsiyalar*\n\n" + analysis)
 
+    # 2-talab: test TUGAGACH test nomi ko'rsatiladi va kontakt ulashish
+    # tugmasi beriladi (javob qabul qilinganidan keyin).
+    await _ans(message, contact_ask_text(test["title"]), parse_mode="HTML",
+               reply_markup=contact_reply_kb())
+
 
 # --------------------------------------------------------------------------- #
 # Handlers — PDF testlar (qo'shish + tekshirish)
@@ -2640,6 +2809,11 @@ async def handle_pdf_answers_input(message: Message, state: dict, text: str) -> 
     if analysis:
         await _safe_send(message, "🤖 *Tahlil va tavsiyalar*\n\n" + analysis)
 
+    # 2-talab: test TUGAGACH test nomi ko'rsatiladi va kontakt ulashish
+    # tugmasi beriladi (javob qabul qilinganidan keyin).
+    await _ans(message, contact_ask_text(test["title"]), parse_mode="HTML",
+               reply_markup=contact_reply_kb())
+
 
 # --------------------------------------------------------------------------- #
 # Handlers — Vositalar (v4: faqat 2 ta — Savol qo'shish, Kanalga ulash)
@@ -2678,7 +2852,8 @@ async def notify_admins_addq(aid: int, user) -> None:
         f"🔔 *Savol qo'shish uchun ruxsat so'rovi* (#{aid})\n\n"
         f"👤 Foydalanuvchi: {esc(uname)}\n"
         f"🆔 ID: `{user.id}`\n\n"
-        "Bu foydalanuvchiga savol qo'shishga ruxsat berasizmi?"
+        "Bu foydalanuvchiga savol qo'shishga ruxsat berasizmi?\n\n"
+        "ℹ️ Username yo'q bo'lsa, ID orqali bog'lanishingiz mumkin."
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Tasdiqlash", callback_data=f"appr:ok:{aid}")
@@ -3608,7 +3783,8 @@ async def on_text(message: Message) -> None:
 
     # 0) Pastdagi doimiy panel tugmalari (oddiy, tabiiy)
     if text == BTN_START:
-        await db.clear_user_state(u.id)
+        # /start — yangi suhbat: AI xotirasi ham, joriy holat ham tozalanadi
+        await _reset_my_conversation(u.id)
         name = u.first_name or "do'stim"
         await _ans(message, 
             f"👋 Xush kelibsiz, *{name}*!\n\nBo'limni tanlang 👇",
@@ -3623,9 +3799,12 @@ async def on_text(message: Message) -> None:
                    reply_markup=_menu_kb_for(u))
         return
     if text == BTN_RESET:
+        # 3-talab: suhbat HAR IKKI tomondan tozalanadi va /start bilan
+        # qaytadan boshlash taklif qilinadi (eski tugmalar/suhbat qolmaydi).
         await _reset_my_conversation(u.id)
         await _ans(message, 
-            "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi.",
+            "🔄 *Suhbat tozalandi.* Eski suhbat ham, bot xotirasi ham "
+            "tozalandi.\n\n▶️ Yangi suhbatni boshlash uchun /start ni yuboring.",
             reply_markup=_menu_kb_for(u),
         )
         return
@@ -3714,6 +3893,19 @@ async def on_text(message: Message) -> None:
         if st == "pdf_answers_input":
             await handle_pdf_answers_input(message, state["data"], text)
             return
+        if st == "contact":
+            if await handle_contact_text(message, text):
+                return
+            # kontakt emas — pastdagi odatdagi oqimga tushamiz
+
+    # 2-talab: foydalanuvchi kontaktni oddiy xabar sifatida yozsa ham qabul qilamiz
+    _phone_like = re.sub(r"[^0-9+]", "", text)
+    if (
+        len(_phone_like) >= 7
+        and re.fullmatch(r"[+0-9][0-9\s()\-]{6,}[0-9]", text.strip())
+    ):
+        await _save_contact_and_ack(message, _phone_like)
+        return
 
     # 1) Test kodi (MATH-0001 / PHY-0001)
     if _TEST_CODE_RE.match(text.strip()):

@@ -268,6 +268,28 @@ CREATE TABLE IF NOT EXISTS pdf_tests (
     created_at  REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pdf_tests_code ON pdf_tests(code);
+
+-- ============== v8: kanal o'sish dinamikasi va foydalanuvchi kontaktlari ==============
+
+CREATE TABLE IF NOT EXISTS channel_member_snapshots (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL,
+    members    INTEGER NOT NULL,
+    taken_at   REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chsnap ON channel_member_snapshots(channel_id, taken_at);
+
+CREATE TABLE IF NOT EXISTS user_contacts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    phone      TEXT    DEFAULT '',
+    contact_id INTEGER,
+    first_name TEXT    DEFAULT '',
+    last_name  TEXT    DEFAULT '',
+    username   TEXT    DEFAULT '',
+    created_at REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ucontact ON user_contacts(user_id);
 """
 
 
@@ -1252,6 +1274,87 @@ class Database:
             )
         row = await cur.fetchone()
         return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v8: kanal statistikasi (o'sish dinamikasi) va kontaktlar
+    # ================================================================== #
+    async def record_channel_snapshot(self, channel_id: int, members: int) -> None:
+        """Kanal a'zolari sonini vaqt bo'yicha yozib boradi (o'sishni hisoblash uchun)."""
+        await self.db.execute(
+            "INSERT INTO channel_member_snapshots (channel_id, members, taken_at) "
+            "VALUES (?, ?, ?)",
+            (int(channel_id), int(members), time.time()),
+        )
+        await self.db.commit()
+
+    async def get_channel_growth(self, channel_id: int) -> dict[str, Any]:
+        """Kanal rivojlanish darajasi: hozirgi son, 24 soat va 7 kunlik o'sish."""
+        now = time.time()
+        cur = await self.db.execute(
+            "SELECT members, taken_at FROM channel_member_snapshots "
+            "WHERE channel_id = ? ORDER BY taken_at ASC",
+            (int(channel_id),),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if not rows:
+            return {}
+        first, last = rows[0], rows[-1]
+
+        def _at_or_before(ts: float) -> dict[str, Any]:
+            best = first
+            for r in rows:
+                if float(r["taken_at"]) <= ts:
+                    best = r
+                else:
+                    break
+            return best
+
+        base_24 = _at_or_before(now - 86400)
+        base_7 = _at_or_before(now - 7 * 86400)
+        cur_m = int(last["members"])
+        return {
+            "current": cur_m,
+            "first": int(first["members"]),
+            "first_at": float(first["taken_at"]),
+            "growth_total": cur_m - int(first["members"]),
+            "growth_24h": cur_m - int(base_24["members"]),
+            "growth_7d": cur_m - int(base_7["members"]),
+            "samples": len(rows),
+        }
+
+    async def get_channel_post_metrics(self, channel_id: int) -> dict[str, int]:
+        """Kanal postlari ko'rsatkichlari: jami / yuborilgan / kutilayotgan."""
+        cur = await self.db.execute(
+            "SELECT COUNT(*) AS c, "
+            "SUM(CASE WHEN sent = 1 THEN 1 ELSE 0 END) AS s "
+            "FROM scheduled_posts WHERE channel_id = ?",
+            (int(channel_id),),
+        )
+        row = await cur.fetchone()
+        total = int(row["c"] or 0) if row else 0
+        sent = int(row["s"] or 0) if row else 0
+        return {"total": total, "sent": sent, "pending": total - sent}
+
+    async def add_user_contact(
+        self,
+        user_id: int,
+        phone: str = "",
+        contact_id: Optional[int] = None,
+        first_name: str = "",
+        last_name: str = "",
+        username: str = "",
+    ) -> None:
+        """Foydalanuvchi ulashgan kontaktni saqlaydi (admin bog'lanishi uchun)."""
+        await self.db.execute(
+            "INSERT INTO user_contacts "
+            "(user_id, phone, contact_id, first_name, last_name, username, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                int(user_id), phone or "", contact_id,
+                first_name or "", last_name or "", username or "", time.time(),
+            ),
+        )
+        await self.db.commit()
 
     # ================================================================== #
     # v6: kanal tasdiqlash oqimi (bot kanalga admin qilinganda)

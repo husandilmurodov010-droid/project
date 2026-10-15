@@ -962,6 +962,31 @@ Birinchi model kvota/xato bersa, avtomatik keyingisiga o'tadi. Sinovda
 
 ---
 
+## 🆕 v8 — 6 ta yangi funksiya
+
+1. **Obuna/ruxsat bildirishnomasida username** — foydalanuvchida `@username`
+   bo'lsa ko'rsatiladi, bo'lmasa ism + `ID` (admin baribir bog'lana oladi).
+2. **Kontakt ulashish** — test tugagach test nomi ko'rsatiladi va
+   «📱 Kontakt ulashish» (`request_contact`) tugmasi beriladi; raqamni oddiy
+   matn sifatida yozish ham mumkin. Kontakt `user_contacts` jadvalida saqlanadi.
+3. **Suhbatni tozalash (ikki tomonlama)** — «🔄 Suhbatni tozalash» ham qo'lda,
+   ham `/start` orqali AI xotirasi (`chat_history`) va joriy holat
+   (`user_states`) ni butunlay o'chiradi, so'ng `/start` bilan yangi suhbat
+   boshlash taklif qilinadi.
+4. **Statistika faqat admin uchun** — oddiy foydalanuvchi «📊 Statistika» o'rniga
+   faqat o'qish uchun «📈 Kanal statistikasi» (`menu:chanstats`) ko'radi.
+5. **Kanal statistikasi ichma-ich takrorlanishi tuzatildi** — `stats:chanstats`
+   endi `stats_admin_kb()` ni qayta bermaydi, shuning uchun
+   «Kanallar statistikasi» tugmasi cheksiz ichma-ich chiqmaydi.
+6. **Kengaytirilgan kanal statistikasi** — a'zolar soni, **rivojlanish darajasi**
+   (24 soat / 7 kun / jami o'sish, `channel_member_snapshots`), postlar holati
+   (yuborilgan/kutilayotgan) va **o'rtacha ko'rishlar** ko'rsatiladi.
+
+**Yangi jadvallar:** `channel_member_snapshots`, `user_contacts`.
+**Yangi callback:** `menu:chanstats` (hammaga ochiq).
+
+---
+
 ## 📄 Litsenziya
 
 Shaxsiy foydalanish uchun. Muallif: Husan Dilmurodov.
