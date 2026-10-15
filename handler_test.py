@@ -152,7 +152,7 @@ async def main() -> None:
     out = await feed("Algebra sinovi", uid=777, uname="begona")
     check("Sarlavha qabul qilindi", any("savol" in t.lower() for t in out))
 
-    out = await feed("2+2? | 3 | 4 | 5 | 6", uid=777, uname="begona")
+    out = await feed("2+2?\n3\n4\n5\n6", uid=777, uname="begona")
     check("Savol qabul qilindi", any("javob" in t.lower() for t in out))
 
     out = await feed("b", uid=777, uname="begona")
@@ -183,7 +183,7 @@ async def main() -> None:
         # Yangi pending yaratamiz
         await feed_cb("sub:math:add", uid=999, uname="yana_begona")
         await feed("Yana test", uid=999, uname="yana_begona")
-        await feed("1+1? | 1 | 2 | 3 | 4", uid=999, uname="yana_begona")
+        await feed("1+1?\n1\n2\n3\n4", uid=999, uname="yana_begona")
         await feed("b", uid=999, uname="yana_begona")
         pend2 = await B.db.list_pending_approvals("pending")
     if pend2:
@@ -195,7 +195,7 @@ async def main() -> None:
     # ------------------------------------------------------------------ #
     print("\n[12] Eslatma o'rnatish")
     await feed_cb("tools:rem_new", uid=555)
-    out = await feed("Kitob o'qish | +2h", uid=555)
+    out = await feed("Kitob o'qish\n+2h", uid=555)
     check("Eslatma o'rnatildi", any("Eslatma" in t for t in out), out[0][:60] if out else "")
     rems = await B.db.list_reminders(555, only_pending=True)
     check("Eslatma bazada mavjud", len(rems) > 0, f"{len(rems)} ta")

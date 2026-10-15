@@ -49,6 +49,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -116,13 +118,6 @@ SYSTEM_PROMPT = (
     "Foydalanuvchi qaysi tilda yozsa, o'sha tilda javob ber (odatda o'zbek tili). "
     "Sohalarni qamrab olasan: matematika, fizika, tarix, ingliz tili, dasturlash, "
     "tibbiyot, biznes, fan, geografiya, adabiyot, manga/anime, umumiy bilim va boshqalar. "
-    "MUHIM — SUHBAT XOTIRASI: senga oldingi suhbat qatlamlari (foydalanuvchi va sen "
-    "yozgan xabarlar) beriladi. Har bir yangi javobni OLDINGI gaplarga bog'lab ber. "
-    "Agar foydalanuvchi 'tahlil qil', 'davom et', 'shuni ishlab ber', 'yana', "
-    "'tushuntir' kabi so'rov yozsa — bu oldingi mavzuga ishora; yangidan boshlamang "
-    "va allaqachon berilgan misolni qaytadan so'ramang. Oldingi javobingda misol "
-    "bergan bo'lsang, endi o'sha misolga tayanib davom et. Faqat foydalanuvchi aniq "
-    "yangi mavzu boshlasa yoki 'reset' qilsa, kontekstni tashlab yangidan boshlaysan. "
     "Javoblaring aniq, qisqa va foydali bo'lsin; kerak bo'lsa misol va qadamlar bilan "
     "tushuntir. Ma'lumot ishonchsiz bo'lsa, buni ochiq ayt. Javobni chiroyli, "
     "o'qishga qulay formatda yoz."
@@ -292,35 +287,76 @@ def _split(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
+def back_kb():
+    """Har bir javob tagiga qo'shiladigan '⬅️ Bosh menyu' tugmasi."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
+    return kb.as_markup()
+
+
+def _with_back(markup):
+    """Berilgan klaviaturaga '⬅️ Bosh menyu' tugmasini qo'shadi (agar yo'q bo'lsa)."""
+    if markup is None:
+        return back_kb()
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return markup
+    has_main = any(
+        getattr(b, "callback_data", None) == "menu:main"
+        for row in markup.inline_keyboard
+        for b in row
+    )
+    is_main_menu = any(
+        getattr(b, "callback_data", None) == "menu:ai"
+        for row in markup.inline_keyboard
+        for b in row
+    )
+    if not has_main and not is_main_menu:
+        markup.inline_keyboard.append(
+            [InlineKeyboardButton(text="⬅️ Bosh menyu", callback_data="menu:main")]
+        )
+    return markup
+
+
+async def _ans(message: Message, text: str, **kwargs) -> None:
+    """Javob yuboradi va tagiga '⬅️ Bosh menyu' tugmasini qo'shadi."""
+    kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
+    await message.answer(text, **kwargs)
+
+
+async def _edit(cb: CallbackQuery, text: str, **kwargs) -> None:
+    """Callback xabarini tahrirlaydi va tagiga '⬅️ Bosh menyu' tugmasini qo'shadi."""
+    kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
+    await cb.message.edit_text(text, **kwargs)
+
+
 async def _safe_send(message: Message, text: str) -> None:
     """Markdown buzilsa, oddiy matn sifatida qayta yuboradi."""
     if not text:
         text = "🤔 Javob bo'sh chiqdi. Savolni boshqacha yozib ko'ring."
     for chunk in _split(text, 4000):
         try:
-            await message.answer(chunk)
+            await _ans(message, chunk)
         except Exception:  # noqa: BLE001
-            await message.answer(chunk, parse_mode=None)
+            await _ans(message, chunk, parse_mode=None)
 
 
-async def _ask_gemini(message: Message, prompt: str, **kwargs) -> str | None:
-    """Gemini'ga so'rov yuborib, javobni xavfsiz yuboradi va matnini qaytaradi."""
+async def _ask_gemini(message: Message, prompt: str, **kwargs) -> None:
+    """Gemini'ga so'rov yuborib, javobni xavfsiz yuboradi."""
     await _typing(message)
     try:
         answer = await pool.generate(prompt, system_instruction=SYSTEM_PROMPT, **kwargs)
     except AllKeysFailedError as exc:
         log.error("Gemini xatosi: %s", exc)
-        await message.answer(
+        await _ans(message, 
             "⚠️ Hozircha AI xizmatiga ulanib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
         )
-        return None
+        return
     except Exception as exc:  # noqa: BLE001
         log.exception("Kutilmagan xato: %s", exc)
-        await message.answer("⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
-        return None
+        await _ans(message, "⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
+        return
 
     await _safe_send(message, answer)
-    return answer
 
 
 async def _ask_gemini_custom(
@@ -332,12 +368,12 @@ async def _ask_gemini_custom(
         return await pool.generate(prompt, system_instruction=system_instruction, **kwargs)
     except AllKeysFailedError as exc:
         log.error("Gemini xatosi: %s", exc)
-        await message.answer(
+        await _ans(message, 
             "⚠️ Hozircha AI xizmatiga ulanib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("Kutilmagan xato: %s", exc)
-        await message.answer("⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
+        await _ans(message, "⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
     return None
 
 
@@ -353,6 +389,7 @@ async def get_admin_ids() -> list[int]:
 # --------------------------------------------------------------------------- #
 def main_menu_kb():
     kb = InlineKeyboardBuilder()
+    kb.button(text="🤖 AI bilan ishlash", callback_data="menu:ai")
     kb.button(text="🎤 IELTS Speaking", callback_data="menu:speaking")
     kb.button(text="✍️ IELTS Writing", callback_data="menu:writing")
     kb.button(text="➗ Matematika", callback_data="menu:math")
@@ -360,8 +397,7 @@ def main_menu_kb():
     kb.button(text="🧰 Vositalar", callback_data="menu:tools")
     kb.button(text="📄 PDF testlarni tekshirish", callback_data="menu:pdftest")
     kb.button(text="🎯 Testlar (umumiy)", callback_data="menu:quiz")
-    kb.button(text="🔄 Suhbatni tozalash", callback_data="menu:reset")
-    kb.adjust(2, 2, 1, 1, 1, 1)
+    kb.adjust(1, 2, 2, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -370,7 +406,7 @@ def speaking_kb():
     kb.button(text="Part 1 — oddiy savollar", callback_data="sp:part:1")
     kb.button(text="Part 2 — cue card", callback_data="sp:part:2")
     kb.button(text="Part 3 — muhokama", callback_data="sp:part:3")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:main")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -379,7 +415,7 @@ def writing_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Task 1 — grafik/xat", callback_data="wr:task:1")
     kb.button(text="Task 2 — insho", callback_data="wr:task:2")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:main")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -389,7 +425,7 @@ def subject_kb(subject: str):
     kb.button(text="📝 Misol yechilishi", callback_data=f"sub:{subject}:solve")
     kb.button(text="🎯 Testlar", callback_data=f"sub:{subject}:list")
     kb.button(text="➕ Test qo'shish", callback_data=f"sub:{subject}:add")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:main")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -398,7 +434,7 @@ def tools_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Savol qo'shish", callback_data="tools:addq")
     kb.button(text="📢 Kanalga ulash", callback_data="tools:channel")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:main")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -410,7 +446,7 @@ def qadd_type_kb():
     kb.button(text="➗ Matematika", callback_data="qadd:type:math")
     kb.button(text="⚛️ Fizika", callback_data="qadd:type:phys")
     kb.button(text="📄 PDF dan test", callback_data="qadd:type:pdf")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:tools")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
     kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
@@ -420,7 +456,7 @@ def qadd_speaking_part_kb():
     kb.button(text="Part 1", callback_data="qadd:sp:1")
     kb.button(text="Part 2", callback_data="qadd:sp:2")
     kb.button(text="Part 3", callback_data="qadd:sp:3")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:addq")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:addq")
     kb.adjust(3, 1)
     return kb.as_markup()
 
@@ -429,7 +465,7 @@ def qadd_writing_task_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Task 1", callback_data="qadd:wr:1")
     kb.button(text="Task 2", callback_data="qadd:wr:2")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:addq")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:addq")
     kb.adjust(2, 1)
     return kb.as_markup()
 
@@ -440,7 +476,7 @@ def channel_kb():
     kb.button(text="📋 Kanallarim", callback_data="chan:list")
     kb.button(text="✍️ Kanalga post", callback_data="chan:post")
     kb.button(text="🗓 Post rejalashtirish", callback_data="chan:schedule")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:tools")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -449,7 +485,7 @@ def reminders_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Yangi eslatma", callback_data="tools:rem_new")
     kb.button(text="📋 Mening eslatmalarim", callback_data="tools:rem_list")
-    kb.button(text="⬅️ Orqaga", callback_data="menu:tools")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -785,7 +821,7 @@ async def cmd_start(message: Message) -> None:
         if config.is_admin(u.id, u.username):
             await db.register_admin(u.id)
     name = u.first_name if u else "do'stim"
-    await message.answer(
+    await _ans(message, 
         f"👋 Salom, *{name}*!\n\n"
         "Men *AI Manager* — HAMMA soha bo'yicha AI yordamchingizman.\n\n"
         "Quyidagi bo'limlardan birini tanlang 👇",
@@ -798,32 +834,29 @@ async def cmd_menu(message: Message) -> None:
     u = message.from_user
     if u:
         await db.upsert_user(u.id, u.username, u.first_name)
-    await message.answer("🏠 *Asosiy menyu* — bo'limni tanlang:", reply_markup=main_menu_kb())
+    await _ans(message, "🏠 *Asosiy menyu* — bo'limni tanlang:", reply_markup=main_menu_kb())
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(
+    await _ans(message, 
         "ℹ️ *AI Manager — yordam*\n\n"
         "🏠 *Bo'limlar (menyu):*\n"
         "🎤 IELTS Speaking — Part 1/2/3, ovozli javobni baholash\n"
         "✍️ IELTS Writing — Task 1/2, inshoni baholash\n"
         "➗ Matematika — misol yechish + testlar\n"
         "⚛️ Fizika — misol yechish + testlar\n"
-        "🧰 Vositalar — savol qo'shish, kanal boshqaruvi\n\n"
+        "🧰 Vositalar — savol qo'shish, kanal boshqaruvi\n"
+        "🤖 AI bilan ishlash — erkin suhbat\n\n"
         "🎯 *Buyruqlar:*\n"
         "`/menu` — asosiy menyu\n"
         "`/quiz` — soha bo'yicha test\n"
         "`/stats` — statistika\n"
         "`/history` — suhbat tarixi\n"
-        "`/reset` — suhbatni tozalash (yangi suhbat)\n"
         "`/lang` — til (uz/en/ru)\n"
         "`/bank [so'z]` — savollar banki\n"
         "`/manga Naruto` — manga haqida\n"
         "`/image <tavsif>` — rasm yaratish\n\n"
-        "🧠 *Suhbat xotirasi:* bot oldingi gaplaringizni eslab qoladi. "
-        "«tahlil qil», «davom et», «shuni ishlab ber» kabi so'rovlar oldingi "
-        "mavzuga tayanadi. Yangidan boshlash uchun: /reset\n\n"
         "📢 *Kanal boshqaruvi (admin):*\n"
         "🧰 Vositalar → 📢 Kanalga ulash → kanal ulash, post joylash, "
         "post rejalashtirish.\n\n"
@@ -843,7 +876,7 @@ async def cmd_quiz(message: Message) -> None:
 
     topics = await db.get_topics()
     if not topics:
-        await message.answer("⚠️ Test savollari bazasi bo'sh.")
+        await _ans(message, "⚠️ Test savollari bazasi bo'sh.")
         return
 
     kb = InlineKeyboardBuilder()
@@ -852,7 +885,7 @@ async def cmd_quiz(message: Message) -> None:
         kb.button(text=f"{t} ({n})", callback_data=f"topic:{t}")
     kb.adjust(2)
 
-    await message.answer("🎯 *Test o'tash*\n\nQaysi sohadan boshlaymiz?", reply_markup=kb.as_markup())
+    await _ans(message, "🎯 *Test o'tash*\n\nQaysi sohadan boshlaymiz?", reply_markup=kb.as_markup())
 
 
 @dp.message(Command("stats"))
@@ -896,7 +929,7 @@ async def cmd_stats(message: Message) -> None:
         for r in results:
             lines.append(f"• {r['topic']}: {r['score']}/{r['total']}")
 
-    await message.answer("\n".join(lines))
+    await _ans(message, "\n".join(lines))
 
 
 @dp.message(Command("history"))
@@ -907,7 +940,7 @@ async def cmd_history(message: Message) -> None:
     await db.upsert_user(u.id, u.username, u.first_name)
     rows = await db.get_history(u.id, limit=10)
     if not rows:
-        await message.answer("🕘 Hozircha suhbat tarixi bo'sh. Savol yozing!")
+        await _ans(message, "🕘 Hozircha suhbat tarixi bo'sh. Savol yozing!")
         return
 
     lines = ["🕘 *Oxirgi suhbatlaringiz:*\n"]
@@ -919,7 +952,7 @@ async def cmd_history(message: Message) -> None:
         lines.append(f"{who} {txt}")
 
     lines.append("\n🗑 Tozalash uchun: /clearhistory")
-    await message.answer("\n".join(lines))
+    await _ans(message, "\n".join(lines))
 
 
 @dp.message(Command("clearhistory"))
@@ -928,21 +961,7 @@ async def cmd_clear_history(message: Message) -> None:
     if not u:
         return
     await db.clear_history(u.id)
-    await message.answer("🗑 Suhbat tarixi tozalandi.")
-
-
-@dp.message(Command("reset"))
-async def cmd_reset(message: Message) -> None:
-    """Suhbatni tozalab, yangi suhbat boshlaydi (kontekstni unutadi)."""
-    u = message.from_user
-    if not u:
-        return
-    await db.clear_history(u.id)
-    await message.answer(
-        "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
-        "gaplarni eslab qolmaydi.",
-        reply_markup=main_menu_kb(),
-    )
+    await _ans(message, "🗑 Suhbat tarixi tozalandi.")
 
 
 @dp.message(Command("lang"))
@@ -955,7 +974,7 @@ async def cmd_lang(message: Message) -> None:
     kb.button(text="🇬🇧 English", callback_data="lang:en")
     kb.button(text="🇷🇺 Русский", callback_data="lang:ru")
     kb.adjust(3)
-    await message.answer("🌐 *Tilni tanlang:*", reply_markup=kb.as_markup())
+    await _ans(message, "🌐 *Tilni tanlang:*", reply_markup=kb.as_markup())
 
 
 @dp.message(Command("bank"))
@@ -966,7 +985,7 @@ async def cmd_bank(message: Message) -> None:
     query = (message.text or "").partition(" ")[2].strip()
     rows = await db.search_question_bank(query or None, limit=10)
     if not rows:
-        await message.answer(
+        await _ans(message, 
             "📚 Savollar banki bo'sh yoki natija topilmadi.\n"
             "Savol bersangiz, javoblar avtomatik bankka saqlanadi."
         )
@@ -976,14 +995,14 @@ async def cmd_bank(message: Message) -> None:
         q = r["question"].replace("\n", " ")[:100]
         lines.append(f"• [{r['subject']}] {q}")
     lines.append("\n🔎 Qidirish: `/bank so'z`")
-    await message.answer("\n".join(lines))
+    await _ans(message, "\n".join(lines))
 
 
 @dp.message(Command("manga"))
 async def cmd_manga(message: Message) -> None:
     title = (message.text or "").partition(" ")[2].strip()
     if not title:
-        await message.answer("✍️ Foydalanish: `/manga Naruto`")
+        await _ans(message, "✍️ Foydalanish: `/manga Naruto`")
         return
     prompt = (
         f"Quyidagi manga haqida batafsil ma'lumot ber: **{title}**.\n"
@@ -1007,10 +1026,10 @@ async def cmd_recommend(message: Message) -> None:
 async def cmd_image(message: Message) -> None:
     prompt = (message.text or "").partition(" ")[2].strip()
     if not prompt:
-        await message.answer("✍️ Foydalanish: `/image kiberpank manga qahramoni`")
+        await _ans(message, "✍️ Foydalanish: `/image kiberpank manga qahramoni`")
         return
     if not config.ENABLE_IMAGE_GEN:
-        await message.answer("🖼 Rasm generatsiyasi o'chirilgan.")
+        await _ans(message, "🖼 Rasm generatsiyasi o'chirilgan.")
         return
 
     await _typing(message)
@@ -1018,7 +1037,7 @@ async def cmd_image(message: Message) -> None:
         images = await pool.generate_image(prompt, count=1)
     except AllKeysFailedError as exc:
         log.error("Rasm xatosi: %s", exc)
-        await message.answer(
+        await _ans(message, 
             "⚠️ Rasm yaratib bo'lmadi. Imagen modeli hisobingizda yoqilmagan bo'lishi mumkin."
         )
         return
@@ -1033,35 +1052,34 @@ async def cmd_image(message: Message) -> None:
 @dp.callback_query(F.data == "menu:main")
 async def on_menu_main(cb: CallbackQuery) -> None:
     await cb.answer()
+    await db.clear_user_state(cb.from_user.id)
     try:
-        await cb.message.edit_text("🏠 *Asosiy menyu* — bo'limni tanlang:",
+        await _edit(cb, "🏠 *Asosiy menyu* — bo'limni tanlang:",
                                    reply_markup=main_menu_kb())
     except Exception:  # noqa: BLE001
-        await cb.message.answer("🏠 *Asosiy menyu*:", reply_markup=main_menu_kb())
+        await _ans(cb.message, "🏠 *Asosiy menyu*:", reply_markup=main_menu_kb())
 
 
-@dp.callback_query(F.data == "menu:reset")
-async def on_menu_reset(cb: CallbackQuery) -> None:
-    """Suhbat tarixini tozalab, yangi suhbat boshlaydi."""
-    await cb.answer("Suhbat tozalandi")
-    await db.clear_history(cb.from_user.id)
-    try:
-        await cb.message.edit_text(
-            "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
-            "gaplarni eslab qolmaydi.\n\n🏠 *Asosiy menyu* — bo'limni tanlang:",
-            reply_markup=main_menu_kb(),
-        )
-    except Exception:  # noqa: BLE001
-        await cb.message.answer(
-            "🔄 Suhbat tozalandi. Yangi suhbat boshlandi.",
-            reply_markup=main_menu_kb(),
-        )
+@dp.callback_query(F.data == "menu:ai")
+async def on_menu_ai(cb: CallbackQuery) -> None:
+    """AI bilan erkin suhbat rejimi."""
+    await cb.answer()
+    await db.set_user_state(cb.from_user.id, "ai_chat", {})
+    await _edit(
+        cb,
+        "🤖 *AI bilan ishlash*\n\n"
+        "Endi menga istalgan savolni yozing — matematika, fizika, tarix, ingliz tili, "
+        "dasturlash, tibbiyot, biznes, fan, geografiya, adabiyot va boshqa har qanday "
+        "sohada javob beraman.\n\n"
+        "✍️ Savolingizni shu chatga yozing.\n"
+        "🚪 Chiqish uchun «⬅️ Bosh menyu» tugmasini bosing.",
+    )
 
 
 @dp.callback_query(F.data == "menu:speaking")
 async def on_menu_speaking(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.edit_text(
+    await _edit(cb, 
         "🎤 *IELTS Speaking*\n\nQuestion type ni tanlang:",
         reply_markup=speaking_kb(),
     )
@@ -1070,7 +1088,7 @@ async def on_menu_speaking(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:writing")
 async def on_menu_writing(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.edit_text(
+    await _edit(cb, 
         "✍️ *IELTS Writing*\n\nTask ni tanlang:",
         reply_markup=writing_kb(),
     )
@@ -1079,7 +1097,7 @@ async def on_menu_writing(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:math")
 async def on_menu_math(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.edit_text(
+    await _edit(cb, 
         "➗ *Matematika*\n\nBo'limni tanlang:",
         reply_markup=subject_kb("math"),
     )
@@ -1088,7 +1106,7 @@ async def on_menu_math(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:physics")
 async def on_menu_physics(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.edit_text(
+    await _edit(cb, 
         "⚛️ *Fizika*\n\nBo'limni tanlang:",
         reply_markup=subject_kb("phys"),
     )
@@ -1097,7 +1115,7 @@ async def on_menu_physics(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:tools")
 async def on_menu_tools(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.edit_text(
+    await _edit(cb, 
         "🧰 *Vositalar*\n\nBo'limni tanlang:",
         reply_markup=tools_kb(),
     )
@@ -1108,12 +1126,12 @@ async def on_menu_pdftest(cb: CallbackQuery) -> None:
     """PDF testlarni tekshirish: test kodini so'raydi."""
     await cb.answer()
     await db.set_user_state(cb.from_user.id, "pdf_answers_code", {})
-    await cb.message.edit_text(
+    await _edit(cb, 
         "📄 *PDF testlarni tekshirish*\n\n"
         "Test kodini kiriting:\n\n"
         "Misol: `12345`",
         reply_markup=InlineKeyboardBuilder().button(
-            text="⬅️ Orqaga", callback_data="menu:main"
+            text="⬅️ Bosh menyu", callback_data="menu:main"
         ).as_markup(),
     )
 
@@ -1123,14 +1141,14 @@ async def on_menu_quiz(cb: CallbackQuery) -> None:
     await cb.answer()
     topics = await db.get_topics()
     if not topics:
-        await cb.message.answer("⚠️ Test savollari bazasi bo'sh.")
+        await _ans(cb.message, "⚠️ Test savollari bazasi bo'sh.")
         return
     kb = InlineKeyboardBuilder()
     for t in topics:
         n = await db.count_questions(t)
         kb.button(text=f"{t} ({n})", callback_data=f"topic:{t}")
     kb.adjust(2)
-    await cb.message.edit_text("🎯 *Test o'tash*\n\nQaysi sohadan boshlaymiz?",
+    await _edit(cb, "🎯 *Test o'tash*\n\nQaysi sohadan boshlaymiz?",
                                reply_markup=kb.as_markup())
 
 
@@ -1171,9 +1189,9 @@ async def on_speaking_part(cb: CallbackQuery) -> None:
         "part": part, "question": q["question"], "cue_card": q.get("cue_card", "")
     })
     try:
-        await cb.message.edit_text(text, parse_mode="HTML")
+        await _edit(cb, text, parse_mode="HTML")
     except Exception:  # noqa: BLE001
-        await cb.message.answer(text, parse_mode="HTML")
+        await _ans(cb.message, text, parse_mode="HTML")
 
 
 async def assess_speaking(message: Message, state: dict, transcript: str) -> None:
@@ -1212,9 +1230,9 @@ async def on_writing_task(cb: CallbackQuery) -> None:
     )
     await db.set_user_state(user_id, "writing", {"task": task, "prompt_id": t["id"]})
     try:
-        await cb.message.edit_text(text, parse_mode="HTML")
+        await _edit(cb, text, parse_mode="HTML")
     except Exception:  # noqa: BLE001
-        await cb.message.answer(text, parse_mode="HTML")
+        await _ans(cb.message, text, parse_mode="HTML")
 
 
 async def assess_writing(message: Message, state: dict, essay: str) -> None:
@@ -1246,7 +1264,7 @@ async def on_subject_action(cb: CallbackQuery) -> None:
     if action == "solve":
         name = "Matematika" if subject == "math" else "Fizika"
         await db.set_user_state(user_id, "problem", {"subject": subject})
-        await cb.message.edit_text(
+        await _edit(cb, 
             f"📝 *{name} — misol yechilishi*\n\n"
             "Misol yoki masalani yozib yuboring — qadam-baqadam yechib beraman.",
             reply_markup=subject_kb(subject),
@@ -1257,7 +1275,7 @@ async def on_subject_action(cb: CallbackQuery) -> None:
         tests = await db.list_tests(subject)
         name = "Matematika" if subject == "math" else "Fizika"
         if not tests:
-            await cb.message.edit_text(
+            await _edit(cb, 
                 f"🎯 *{name} testlari*\n\nHozircha test yo'q. "
                 "«➕ Test qo'shish» orqali qo'shishingiz mumkin.",
                 reply_markup=subject_kb(subject),
@@ -1270,7 +1288,7 @@ async def on_subject_action(cb: CallbackQuery) -> None:
             "\n📌 Test kodini yuboring (masalan `" + tests[0]["code"] + "`), "
             "so'ng javoblarni `abcdfdddd` ko'rinishida yuboring."
         )
-        await cb.message.edit_text("\n".join(lines), reply_markup=subject_kb(subject))
+        await _edit(cb, "\n".join(lines), reply_markup=subject_kb(subject))
         return
 
     if action == "add":
@@ -1278,7 +1296,7 @@ async def on_subject_action(cb: CallbackQuery) -> None:
         await db.set_user_state(user_id, "test_add", {
             "subject": subject, "step": "title", "title": "", "questions": [], "answers": ""
         })
-        await cb.message.edit_text(
+        await _edit(cb, 
             f"➕ *{name} — test qo'shish*\n\n"
             "1️⃣ Test sarlavhasini yuboring (masalan: *Algebra asoslari*).\n\n"
             "ℹ️ Test admin tasdiqlagach bazaga qo'shiladi va unikal kod oladi.",
@@ -1298,40 +1316,37 @@ async def handle_test_add(message: Message, state: dict, text: str) -> None:
         data["title"] = text.strip()[:120]
         data["step"] = "questions"
         await db.set_user_state(user_id, "test_add", data)
-        await message.answer(
-            "2️⃣ Endi savollarni yuboring. Har bir savol alohida qatorda, "
-            "quyidagi formatda:\n\n"
-            "`Savol matni | variant1 | variant2 | variant3 | variant4`\n\n"
+        await _ans(message, 
+            "2️⃣ Endi savollarni yuboring. Har bir savolni alohida blok qilib yozing:\n"
+            "birinchi qatorda savol, keyingi qatorlarda variantlar.\n"
+            "Bloklar orasida bo'sh qator qoldiring.\n\n"
             "Misol:\n"
-            "`2+2 nechaga teng? | 3 | 4 | 5 | 6`\n"
-            "`5×5 nechaga teng? | 20 | 25 | 30 | 35`"
+            "2+2 nechaga teng?\n3\n4\n5\n6\n\n"
+            "5×5 nechaga teng?\n20\n25\n30\n35"
         )
         return
 
     if step == "questions":
         questions = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or "|" not in line:
+        for block in re.split(r"\n\s*\n", text.strip()):
+            lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+            if len(lines) < 3:
                 continue
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) < 3:
-                continue
-            q = parts[0]
-            opts = parts[1:5]
+            q = lines[0]
+            opts = lines[1:5]
             if len(opts) < 2:
                 continue
             questions.append({"q": q, "options": opts})
         if not questions:
-            await message.answer(
-                "⚠️ Savollar formati noto'g'ri. Har bir qatorda "
-                "`Savol | v1 | v2 | v3 | v4` ko'rinishida yuboring."
+            await _ans(message, 
+                "⚠️ Savollar formati noto'g'ri. Har bir savolni alohida blok qilib "
+                "yuboring: birinchi qatorda savol, keyingi qatorlarda variantlar."
             )
             return
         data["questions"] = questions
         data["step"] = "answers"
         await db.set_user_state(user_id, "test_add", data)
-        await message.answer(
+        await _ans(message, 
             f"✅ {len(questions)} ta savol qabul qilindi.\n\n"
             "3️⃣ Endi to'g'ri javoblarni variant harflari ketma-ketligi sifatida yuboring.\n"
             f"Misol: `{('a' * len(questions))}` (a, b, c, d harflari)."
@@ -1342,7 +1357,7 @@ async def handle_test_add(message: Message, state: dict, text: str) -> None:
         answers = re.sub(r"[^a-f]", "", text.lower())
         n = len(data["questions"])
         if len(answers) != n:
-            await message.answer(
+            await _ans(message, 
                 f"⚠️ Javoblar soni savollar soniga teng bo'lishi kerak: "
                 f"{n} ta harf kerak, siz {len(answers)} ta yubordingiz."
             )
@@ -1361,7 +1376,7 @@ async def handle_test_add(message: Message, state: dict, text: str) -> None:
             await db.add_test(subject, code, data["title"], data["questions"],
                               answers, created_by=u.id)
             await db.clear_user_state(user_id)
-            await message.answer(
+            await _ans(message, 
                 f"✅ Test bazaga qo'shildi!\n\n"
                 f"🔑 Kod: `{code}`\n📄 {esc(data['title'])}\n"
                 f"❓ Savollar: {n} ta\n\n"
@@ -1372,7 +1387,7 @@ async def handle_test_add(message: Message, state: dict, text: str) -> None:
         # Admin emas — tasdiqlash so'rovi
         aid = await db.create_pending_approval(u.id, subject, payload)
         await db.clear_user_state(user_id)
-        await message.answer(
+        await _ans(message, 
             "⏳ So'rovingiz adminga yuborildi. Tasdiqlangach test bazaga qo'shiladi "
             "va sizga kod yuboriladi."
         )
@@ -1440,7 +1455,7 @@ async def on_approval(cb: CallbackQuery) -> None:
             await db.register_admin(requester, payload.get("username") or None)
             await cb.answer("Ruxsat berildi ✅")
             try:
-                await cb.message.edit_text(f"✅ Ruxsat berildi (#{aid})")
+                await _edit(cb, f"✅ Ruxsat berildi (#{aid})")
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -1455,7 +1470,7 @@ async def on_approval(cb: CallbackQuery) -> None:
             await db.set_approval_status(aid, "rejected", u.id)
             await cb.answer("Rad etildi ❌")
             try:
-                await cb.message.edit_text(f"❌ Rad etildi (#{aid})")
+                await _edit(cb, f"❌ Rad etildi (#{aid})")
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -1474,7 +1489,7 @@ async def on_approval(cb: CallbackQuery) -> None:
         await db.set_approval_status(aid, "approved", u.id)
         await cb.answer("Tasdiqlandi ✅")
         try:
-            await cb.message.edit_text(
+            await _edit(cb, 
                 f"✅ Tasdiqlandi (#{aid})\n🔑 Kod: `{code}`\n📄 {esc(payload['title'])}"
             )
         except Exception:  # noqa: BLE001
@@ -1492,7 +1507,7 @@ async def on_approval(cb: CallbackQuery) -> None:
         await db.set_approval_status(aid, "rejected", u.id)
         await cb.answer("Rad etildi ❌")
         try:
-            await cb.message.edit_text(f"❌ Rad etildi (#{aid})")
+            await _edit(cb, f"❌ Rad etildi (#{aid})")
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -1509,7 +1524,7 @@ async def handle_test_code(message: Message, code: str) -> None:
     user_id = message.from_user.id
     test = await db.get_test_by_code(code)
     if not test:
-        await message.answer(f"⚠️ `{code}` kodi topilmadi.")
+        await _ans(message, f"⚠️ `{code}` kodi topilmadi.")
         return
 
     qs = test["questions"]
@@ -1524,7 +1539,7 @@ async def handle_test_code(message: Message, code: str) -> None:
         f"Misol: `{('a' * len(qs))}`"
     )
     await db.set_user_state(user_id, "test_answers", {"code": test["code"]})
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await _ans(message, "\n".join(lines), parse_mode="HTML")
 
 
 async def handle_test_answers(message: Message, state: dict, text: str) -> None:
@@ -1534,13 +1549,13 @@ async def handle_test_answers(message: Message, state: dict, text: str) -> None:
     test = await db.get_test_by_code(code)
     if not test:
         await db.clear_user_state(user_id)
-        await message.answer("⚠️ Test topilmadi.")
+        await _ans(message, "⚠️ Test topilmadi.")
         return
 
     ua = re.sub(r"[^a-f]", "", text.lower())
     n = len(test["questions"])
     if len(ua) != n:
-        await message.answer(
+        await _ans(message, 
             f"⚠️ {n} ta harf kerak, siz {len(ua)} ta yubordingiz. "
             f"Qaytadan yuboring (masalan `{('a' * n)}`)."
         )
@@ -1552,7 +1567,7 @@ async def handle_test_answers(message: Message, state: dict, text: str) -> None:
     await db.clear_user_state(user_id)
 
     result = format_test_result(code, test["title"], correct, n, detail, test["questions"])
-    await message.answer(result, parse_mode="HTML")
+    await _ans(message, result, parse_mode="HTML")
 
 
 # --------------------------------------------------------------------------- #
@@ -1569,19 +1584,19 @@ async def handle_pdf_add(message: Message, state: dict, text: str) -> None:
     if step == "code":
         code = text.strip()
         if not code or len(code) > 32 or " " in code:
-            await message.answer(
+            await _ans(message, 
                 "⚠️ Kod bo'sh joysiz, 32 belgidan qisqa bo'lsin. Qaytadan kiriting:"
             )
             return
         if await db.pdf_test_code_exists(code):
-            await message.answer(
+            await _ans(message, 
                 f"⚠️ `{code}` kodi allaqachon band. Boshqa kod kiriting:"
             )
             return
         state["code"] = code
         state["step"] = "title"
         await db.set_user_state(user_id, "pdf_add", state)
-        await message.answer(
+        await _ans(message, 
             "3️⃣ Test sarlavhasini kiriting (masalan: *Matematika 1-chorak testi*)."
         )
         return
@@ -1593,7 +1608,7 @@ async def handle_pdf_add(message: Message, state: dict, text: str) -> None:
         qs = state.get("questions", [])
         mc = [q for q in qs if q.get("type") == "mc"]
         op = [q for q in qs if q.get("type") == "open"]
-        await message.answer(
+        await _ans(message, 
             "4️⃣ Endi *to'g'ri javoblarni* kiriting.\n\n"
             f"📊 Savollar: *{len(qs)}* ta (test: {len(mc)}, ochiq: {len(op)})\n\n"
             "Formatlar:\n"
@@ -1608,7 +1623,7 @@ async def handle_pdf_add(message: Message, state: dict, text: str) -> None:
         questions = state.get("questions", [])
         answers = parse_answer_input(text, questions)
         if not answers:
-            await message.answer(
+            await _ans(message, 
                 "⚠️ Javoblarni tushunmadim. Test uchun `abcdba`, ochiq uchun "
                 "`36a)2.3` ko'rinishida yuboring."
             )
@@ -1622,7 +1637,7 @@ async def handle_pdf_add(message: Message, state: dict, text: str) -> None:
             created_by=user_id,
         )
         await db.clear_user_state(user_id)
-        await message.answer(
+        await _ans(message, 
             f"✅ *PDF test bazaga qo'shildi!*\n\n"
             f"🔑 Kod: `{code}`\n📄 {esc(title)}\n"
             f"❓ Savollar: {len(questions)} ta\n"
@@ -1640,7 +1655,7 @@ async def handle_pdf_answers_code(message: Message, text: str) -> None:
     code = text.strip()
     test = await db.get_pdf_test_by_code(code)
     if not test:
-        await message.answer(
+        await _ans(message, 
             f"⚠️ `{code}` kodi topilmadi. Kodni to'g'ri kiriting yoki "
             "«⬅️ Orqaga» orqali menyuga qayting."
         )
@@ -1666,7 +1681,7 @@ async def handle_pdf_answers_code(message: Message, text: str) -> None:
     lines.append("\nMisol: `abcdba 36a)2.3`")
 
     await db.set_user_state(user_id, "pdf_answers_input", {"code": test["code"]})
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await _ans(message, "\n".join(lines), parse_mode="HTML")
 
 
 async def handle_pdf_answers_input(message: Message, state: dict, text: str) -> None:
@@ -1676,7 +1691,7 @@ async def handle_pdf_answers_input(message: Message, state: dict, text: str) -> 
     test = await db.get_pdf_test_by_code(code)
     if not test:
         await db.clear_user_state(user_id)
-        await message.answer("⚠️ Test topilmadi.")
+        await _ans(message, "⚠️ Test topilmadi.")
         return
 
     correct, total, detail = check_pdf_answers(text, test)
@@ -1688,7 +1703,7 @@ async def handle_pdf_answers_input(message: Message, state: dict, text: str) -> 
     await db.clear_user_state(user_id)
 
     result = format_pdf_result(code, test["title"], correct, total, detail)
-    await message.answer(result, parse_mode="HTML")
+    await _ans(message, result, parse_mode="HTML")
 
 
 # --------------------------------------------------------------------------- #
@@ -1699,7 +1714,7 @@ async def on_tools_addq(cb: CallbackQuery) -> None:
     u = cb.from_user
     await cb.answer()
     if config.is_admin(u.id, u.username):
-        await cb.message.edit_text(
+        await _edit(cb, 
             "➕ *Savol qo'shish*\n\nQaysi bo'limga savol qo'shmoqchisiz?",
             reply_markup=qadd_type_kb(),
         )
@@ -1709,7 +1724,7 @@ async def on_tools_addq(cb: CallbackQuery) -> None:
         u.id, "addq",
         {"username": u.username or "", "first_name": u.first_name or "", "user_id": u.id},
     )
-    await cb.message.edit_text(
+    await _edit(cb, 
         "⏳ *Ruxsat so'raldi*\n\n"
         "Savol qo'shish uchun admin tasdiqlashi kerak. So'rovingiz adminga "
         "yuborildi — tasdiqlangach sizga xabar beraman."
@@ -1747,12 +1762,12 @@ async def on_qadd_type(cb: CallbackQuery) -> None:
     kind = cb.data.split(":")[2]
     await cb.answer()
     if kind == "speaking":
-        await cb.message.edit_text(
+        await _edit(cb, 
             "🎤 *IELTS Speaking* — qaysi partga savol qo'shasiz?",
             reply_markup=qadd_speaking_part_kb(),
         )
     elif kind == "writing":
-        await cb.message.edit_text(
+        await _edit(cb, 
             "✍️ *IELTS Writing* — qaysi taskka topshiriq qo'shasiz?",
             reply_markup=qadd_writing_task_kb(),
         )
@@ -1761,14 +1776,14 @@ async def on_qadd_type(cb: CallbackQuery) -> None:
         await db.set_user_state(cb.from_user.id, "test_add", {
             "subject": kind, "step": "title", "title": "", "questions": [], "answers": ""
         })
-        await cb.message.edit_text(
+        await _edit(cb, 
             f"➕ *{name} — test qo'shish*\n\n"
             "1️⃣ Test sarlavhasini yuboring (masalan: *Algebra asoslari*).\n\n"
             "ℹ️ Test admin tasdiqlagach bazaga qo'shiladi va unikal kod oladi."
         )
     elif kind == "pdf":
         await db.set_user_state(cb.from_user.id, "pdf_add", {"step": "file"})
-        await cb.message.edit_text(
+        await _edit(cb, 
             "📄 *PDF dan test qo'shish*\n\n"
             "1️⃣ PDF faylni yuboring (matematika yoki ixtiyoriy sohadan).\n\n"
             "ℹ️ PDF dan savollar avtomatik ajratib olinadi. Keyin test kodini, "
@@ -1783,16 +1798,19 @@ async def on_qadd_speaking_part(cb: CallbackQuery) -> None:
     await cb.answer()
     await db.set_user_state(cb.from_user.id, "qadd_speaking", {"part": part})
     if part == 2:
-        await cb.message.edit_text(
+        await _edit(cb, 
             "🎤 *IELTS Speaking — Part 2 (cue card)*\n\n"
-            "Cue card mavzusini yuboring. Keyingi qatordan bandlarni yozing.\n\n"
-            "Format:\n`Mavzu | band1 | band2 | band3`\n\n"
-            "Misol:\n`Describe a book you liked | what it was | why you read it | why you liked it`"
+            "Cue card mavzusini birinchi qatorga, bandlarni keyingi qatorlarga yozing.\n\n"
+            "Misol:\n"
+            "Describe a book you liked\n"
+            "what it was\n"
+            "why you read it\n"
+            "why you liked it"
         )
     else:
-        await cb.message.edit_text(
+        await _edit(cb, 
             f"🎤 *IELTS Speaking — Part {part}*\n\n"
-            "Savol matnini yuboring (ixtiyoriy: `savol | mavzu`)."
+            "Savol matnini yuboring. (Ixtiyoriy: ikkinchi qatorga mavzuni yozing.)"
         )
 
 
@@ -1801,9 +1819,9 @@ async def on_qadd_writing_task(cb: CallbackQuery) -> None:
     task = int(cb.data.split(":")[2])
     await cb.answer()
     await db.set_user_state(cb.from_user.id, "qadd_writing", {"task": task})
-    await cb.message.edit_text(
+    await _edit(cb, 
         f"✍️ *IELTS Writing — Task {task}*\n\n"
-        "Topshiriq matnini yuboring (ixtiyoriy: `topshiriq | min_so'z`)."
+        "Topshiriq matnini yuboring. (Ixtiyoriy: ikkinchi qatorga minimal so'z sonini yozing.)"
     )
 
 
@@ -1812,13 +1830,13 @@ async def on_tools_channel(cb: CallbackQuery) -> None:
     u = cb.from_user
     await cb.answer()
     if not config.is_admin(u.id, u.username):
-        await cb.message.edit_text(
+        await _edit(cb, 
             "🔒 *Kanalga ulash* faqat admin uchun.\n\n"
             f"Admin: @{config.ADMIN_USERNAMES[0] if config.ADMIN_USERNAMES else 'admin'}"
         )
         return
     n = await db.count_channels()
-    await cb.message.edit_text(
+    await _edit(cb, 
         f"📢 *Kanal boshqaruvi*\n\nUlangan kanallar: *{n}* ta\n\nBo'limni tanlang:",
         reply_markup=channel_kb(),
     )
@@ -1828,7 +1846,7 @@ async def on_tools_channel(cb: CallbackQuery) -> None:
 async def on_chan_connect(cb: CallbackQuery) -> None:
     await cb.answer()
     await db.set_user_state(cb.from_user.id, "chan_connect", {})
-    await cb.message.edit_text(
+    await _edit(cb, 
         "➕ *Kanal ulash*\n\n"
         "Kanalning @username ini yoki ID sini yuboring.\n\n"
         "⚠️ Bot kanalda *admin* bo'lishi shart.\n\n"
@@ -1841,7 +1859,7 @@ async def on_chan_list(cb: CallbackQuery) -> None:
     await cb.answer()
     rows = await db.list_channels()
     if not rows:
-        await cb.message.edit_text(
+        await _edit(cb, 
             "📋 Hozircha kanal ulanmagan.\n\n«➕ Kanal ulash» orqali ulang.",
             reply_markup=channel_kb(),
         )
@@ -1852,9 +1870,9 @@ async def on_chan_list(cb: CallbackQuery) -> None:
         uname = f" (@{r['username']})" if r["username"] else ""
         lines.append(f"• {esc(r['title'] or r['channel_id'])}{uname}\n  `{r['channel_id']}`")
         kb.button(text=f"🗑 {r['title'] or r['channel_id']}", callback_data=f"chan:del:{r['channel_id']}")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:channel")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:channel")
     kb.adjust(1)
-    await cb.message.edit_text("\n".join(lines), reply_markup=kb.as_markup())
+    await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data.startswith("chan:del:"))
@@ -1864,22 +1882,22 @@ async def on_chan_del(cb: CallbackQuery) -> None:
     await cb.answer("O'chirildi 🗑")
     rows = await db.list_channels()
     if not rows:
-        await cb.message.edit_text("📋 Kanallar yo'q.", reply_markup=channel_kb())
+        await _edit(cb, "📋 Kanallar yo'q.", reply_markup=channel_kb())
         return
     kb = InlineKeyboardBuilder()
     lines = ["📋 *Ulangan kanallar:*\n"]
     for r in rows:
         lines.append(f"• {esc(r['title'] or r['channel_id'])} — `{r['channel_id']}`")
         kb.button(text=f"🗑 {r['title'] or r['channel_id']}", callback_data=f"chan:del:{r['channel_id']}")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:channel")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:channel")
     kb.adjust(1)
-    await cb.message.edit_text("\n".join(lines), reply_markup=kb.as_markup())
+    await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
 
 async def _pick_channel(cb: CallbackQuery, action: str) -> None:
     rows = await db.list_channels()
     if not rows:
-        await cb.message.edit_text(
+        await _edit(cb, 
             "⚠️ Avval kanal ulang («➕ Kanal ulash»).", reply_markup=channel_kb()
         )
         return
@@ -1890,27 +1908,27 @@ async def _pick_channel(cb: CallbackQuery, action: str) -> None:
     for r in rows:
         kb.button(text=r["title"] or str(r["channel_id"]),
                   callback_data=f"chan:{action}:pick:{r['channel_id']}")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:channel")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:channel")
     kb.adjust(1)
-    await cb.message.edit_text("📢 Qaysi kanalga?", reply_markup=kb.as_markup())
+    await _edit(cb, "📢 Qaysi kanalga?", reply_markup=kb.as_markup())
 
 
 async def _start_channel_action(cb: CallbackQuery, action: str, channel_id: int) -> None:
     if action == "post":
         await db.set_user_state(cb.from_user.id, "chan_post", {"channel_id": channel_id})
-        await cb.message.edit_text(
+        await _edit(cb, 
             "✍️ *Kanalga post*\n\n"
             "Yubormoqchi bo'lgan matnni (yoki rasmni izohi bilan) yuboring — "
             "kanalga joylayman."
         )
     elif action == "schedule":
         await db.set_user_state(cb.from_user.id, "chan_schedule", {"channel_id": channel_id})
-        await cb.message.edit_text(
+        await _edit(cb, 
             "🗓 *Post rejalashtirish*\n\n"
-            "Format: `matn | vaqt`\n\n"
+            "Birinchi qatorda post matni, ikkinchi qatorda vaqt.\n\n"
             "Vaqt: `+30m`, `+2h`, `+1d`, `09:30`, `2026-10-20 14:00`\n"
-            "Takrorlash uchun: `matn | +1d | 1440` (har 1440 daqiqada)\n\n"
-            "Misol: `Bugungi test savollari | +2h`"
+            "Takrorlash uchun uchinchi qatorga daqiqalarni yozing (masalan 1440).\n\n"
+            "Misol:\nBugungi test savollari\n+2h"
         )
 
 
@@ -1948,7 +1966,7 @@ async def handle_channel_connect(message: Message, text: str) -> None:
         chat = await bot.get_chat(raw)
     except Exception as exc:  # noqa: BLE001
         log.warning("Kanal topilmadi (%s): %s", raw, exc)
-        await message.answer(
+        await _ans(message, 
             "⚠️ Kanal topilmadi. @username yoki ID to'g'riligini tekshiring va "
             "bot kanalga qo'shilganiga ishonch hosil qiling."
         )
@@ -1960,20 +1978,20 @@ async def handle_channel_connect(message: Message, text: str) -> None:
         member = await bot.get_chat_member(chat.id, me.id)
         status = getattr(member, "status", "")
         if status not in ("administrator", "creator"):
-            await message.answer(
+            await _ans(message, 
                 "⚠️ Bot bu kanalda *admin* emas. Iltimos, botni kanalga admin qilib "
                 "qo'shing, so'ng qayta urinib ko'ring."
             )
             return
     except Exception as exc:  # noqa: BLE001
         log.warning("A'zolikni tekshirishda xato: %s", exc)
-        await message.answer("⚠️ Kanal a'zoligini tekshirib bo'lmadi.")
+        await _ans(message, "⚠️ Kanal a'zoligini tekshirib bo'lmadi.")
         return
 
     await db.add_channel(user_id, chat.id, chat.title or "", chat.username or "")
     await db.clear_user_state(user_id)
     uname = f" (@{chat.username})" if chat.username else ""
-    await message.answer(
+    await _ans(message, 
         f"✅ *Kanal ulandi!*\n\n"
         f"📢 {esc(chat.title or chat.id)}{uname}\n"
         f"🆔 `{chat.id}`\n\n"
@@ -1990,38 +2008,39 @@ async def handle_channel_post(message: Message, state: dict, text: str) -> None:
         await bot.send_message(cid, text, parse_mode=None)
     except Exception as exc:  # noqa: BLE001
         log.warning("Kanalga post yuborilmadi (%s): %s", cid, exc)
-        await message.answer("⚠️ Kanalga post yuborilmadi. Bot admin ekanligini tekshiring.")
+        await _ans(message, "⚠️ Kanalga post yuborilmadi. Bot admin ekanligini tekshiring.")
         return
     await db.clear_user_state(user_id)
-    await message.answer("✅ Post kanalga joylandi!", reply_markup=channel_kb())
+    await _ans(message, "✅ Post kanalga joylandi!", reply_markup=channel_kb())
 
 
 async def handle_channel_schedule(message: Message, state: dict, text: str) -> None:
     """Kanalga postni rejalashtiradi."""
     user_id = message.from_user.id
     cid = state["channel_id"]
-    parts = [p.strip() for p in text.split("|")]
-    if len(parts) < 2:
-        await message.answer(
-            "⚠️ Format: `matn | vaqt`\nMisol: `Test savollari | +2h`"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        await _ans(message, 
+            "⚠️ Format: birinchi qatorda matn, ikkinchi qatorda vaqt.\n"
+            "Misol:\nTest savollari\n+2h"
         )
         return
-    body = parts[0]
-    ts = parse_reminder_time(parts[1])
+    body = lines[0]
+    ts = parse_reminder_time(lines[1])
     if not body or ts is None:
-        await message.answer(
+        await _ans(message, 
             "⚠️ Vaqtni tushunmadim. Formatlar: `+30m`, `+2h`, `+1d`, `09:30`, "
             "`2026-10-20 14:00`."
         )
         return
     repeat = 0
-    if len(parts) >= 3 and parts[2].isdigit():
-        repeat = int(parts[2])
+    if len(lines) >= 3 and lines[2].isdigit():
+        repeat = int(lines[2])
     pid = await db.add_scheduled_post(cid, body, ts, repeat_minutes=repeat, created_by=user_id)
     await db.clear_user_state(user_id)
     dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
     rep = f"\n🔁 Har {repeat} daqiqada takrorlanadi" if repeat else ""
-    await message.answer(
+    await _ans(message, 
         f"✅ Post rejalashtirildi! (#{pid})\n\n📌 {esc(body)}\n⏰ {dt}{rep}",
         reply_markup=channel_kb(),
     )
@@ -2031,20 +2050,19 @@ async def handle_qadd_speaking(message: Message, state: dict, text: str) -> None
     """IELTS Speaking savolini bazaga qo'shadi."""
     user_id = message.from_user.id
     part = state.get("part", 1)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if part == 2:
-        parts = [p.strip() for p in text.split("|")]
-        cue = parts[0]
-        bullets = [p for p in parts[1:] if p]
+        cue = lines[0] if lines else text.strip()
+        bullets = lines[1:]
         await db.add_speaking_question(
             part, cue, cue_card=cue, bullets=bullets, prep_seconds=60, speak_seconds=120
         )
     else:
-        parts = [p.strip() for p in text.split("|")]
-        q = parts[0]
-        topic = parts[1] if len(parts) > 1 else ""
+        q = lines[0] if lines else text.strip()
+        topic = lines[1] if len(lines) > 1 else ""
         await db.add_speaking_question(part, q, topic=topic)
     await db.clear_user_state(user_id)
-    await message.answer(
+    await _ans(message, 
         f"✅ Savol qo'shildi! (IELTS Speaking — Part {part})",
         reply_markup=qadd_type_kb(),
     )
@@ -2054,14 +2072,14 @@ async def handle_qadd_writing(message: Message, state: dict, text: str) -> None:
     """IELTS Writing topshirig'ini bazaga qo'shadi."""
     user_id = message.from_user.id
     task = state.get("task", 2)
-    parts = [p.strip() for p in text.split("|")]
-    prompt = parts[0]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    prompt = lines[0] if lines else text.strip()
     minw = 0
-    if len(parts) > 1 and parts[1].isdigit():
-        minw = int(parts[1])
+    if len(lines) > 1 and lines[1].isdigit():
+        minw = int(lines[1])
     await db.add_writing_task(task, prompt, min_words=minw)
     await db.clear_user_state(user_id)
-    await message.answer(
+    await _ans(message, 
         f"✅ Topshiriq qo'shildi! (IELTS Writing — Task {task})",
         reply_markup=qadd_type_kb(),
     )
@@ -2070,7 +2088,7 @@ async def handle_qadd_writing(message: Message, state: dict, text: str) -> None:
 @dp.callback_query(F.data == "tools:rem")
 async def on_tools_rem(cb: CallbackQuery) -> None:
     await cb.answer()
-    await cb.message.edit_text(
+    await _edit(cb, 
         "⏰ *Eslatmalar*\n\nEslatma o'rnating — belgilangan vaqtda eslatib qo'yaman.",
         reply_markup=reminders_kb(),
     )
@@ -2080,17 +2098,16 @@ async def on_tools_rem(cb: CallbackQuery) -> None:
 async def on_rem_new(cb: CallbackQuery) -> None:
     await cb.answer()
     await db.set_user_state(cb.from_user.id, "reminder", {})
-    await cb.message.edit_text(
+    await _edit(cb, 
         "⏰ *Yangi eslatma*\n\n"
-        "Eslatma matni va vaqtini quyidagi formatda yuboring:\n\n"
-        "`matn | vaqt`\n\n"
+        "Birinchi qatorda eslatma matni, ikkinchi qatorda vaqt.\n\n"
         "Vaqt formatlari:\n"
         "• `+30m` — 30 daqiqadan so'ng\n"
         "• `+2h` — 2 soatdan so'ng\n"
         "• `+1d` — 1 kundan so'ng\n"
         "• `09:30` — bugun/ertaga 09:30\n"
         "• `2026-10-20 14:00` — aniq sana va vaqt\n\n"
-        "Misol: `Darsni takrorlash | +2h`",
+        "Misol:\nDarsni takrorlash\n+2h",
         reply_markup=reminders_kb(),
     )
 
@@ -2100,7 +2117,7 @@ async def on_rem_list(cb: CallbackQuery) -> None:
     await cb.answer()
     rows = await db.list_reminders(cb.from_user.id, only_pending=True)
     if not rows:
-        await cb.message.edit_text("📋 Hozircha faol eslatmalar yo'q.",
+        await _edit(cb, "📋 Hozircha faol eslatmalar yo'q.",
                                    reply_markup=reminders_kb())
         return
     kb = InlineKeyboardBuilder()
@@ -2109,9 +2126,9 @@ async def on_rem_list(cb: CallbackQuery) -> None:
         dt = datetime.fromtimestamp(r["remind_at"]).strftime("%Y-%m-%d %H:%M")
         lines.append(f"• #{r['id']} — {esc(r['text'])} ({dt})")
         kb.button(text=f"🗑 #{r['id']}", callback_data=f"rem:del:{r['id']}")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:rem")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:rem")
     kb.adjust(3)
-    await cb.message.edit_text("\n".join(lines), reply_markup=kb.as_markup())
+    await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data.startswith("rem:del:"))
@@ -2121,7 +2138,7 @@ async def on_rem_del(cb: CallbackQuery) -> None:
     await cb.answer("O'chirildi 🗑")
     rows = await db.list_reminders(cb.from_user.id, only_pending=True)
     if not rows:
-        await cb.message.edit_text("📋 Faol eslatmalar yo'q.", reply_markup=reminders_kb())
+        await _edit(cb, "📋 Faol eslatmalar yo'q.", reply_markup=reminders_kb())
         return
     kb = InlineKeyboardBuilder()
     lines = ["📋 *Faol eslatmalar:*\n"]
@@ -2129,23 +2146,24 @@ async def on_rem_del(cb: CallbackQuery) -> None:
         dt = datetime.fromtimestamp(r["remind_at"]).strftime("%Y-%m-%d %H:%M")
         lines.append(f"• #{r['id']} — {esc(r['text'])} ({dt})")
         kb.button(text=f"🗑 #{r['id']}", callback_data=f"rem:del:{r['id']}")
-    kb.button(text="⬅️ Orqaga", callback_data="tools:rem")
+    kb.button(text="⬅️ Bosh menyu", callback_data="tools:rem")
     kb.adjust(3)
-    await cb.message.edit_text("\n".join(lines), reply_markup=kb.as_markup())
+    await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
 
 async def handle_reminder(message: Message, text: str) -> None:
     user_id = message.from_user.id
-    if "|" not in text:
-        await message.answer(
-            "⚠️ Format: `matn | vaqt`\nMisol: `Darsni takrorlash | +2h`"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        await _ans(message, 
+            "⚠️ Format: birinchi qatorda matn, ikkinchi qatorda vaqt.\n"
+            "Misol:\nDarsni takrorlash\n+2h"
         )
         return
-    body, _, when = text.partition("|")
-    body = body.strip()
-    ts = parse_reminder_time(when.strip())
+    body = lines[0]
+    ts = parse_reminder_time(lines[1])
     if not body or ts is None:
-        await message.answer(
+        await _ans(message, 
             "⚠️ Vaqtni tushunmadim. Formatlar: `+30m`, `+2h`, `+1d`, `09:30`, "
             "`2026-10-20 14:00`."
         )
@@ -2153,7 +2171,7 @@ async def handle_reminder(message: Message, text: str) -> None:
     await db.add_reminder(user_id, body, ts)
     await db.clear_user_state(user_id)
     dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-    await message.answer(f"✅ Eslatma o'rnatildi!\n\n📌 {esc(body)}\n⏰ {dt}")
+    await _ans(message, f"✅ Eslatma o'rnatildi!\n\n📌 {esc(body)}\n⏰ {dt}")
 
 
 # --------------------------------------------------------------------------- #
@@ -2173,7 +2191,7 @@ async def on_topic_choice(cb: CallbackQuery) -> None:
     await db.bump("quizzes_taken")
     await cb.answer()
     try:
-        await cb.message.edit_text(f"🎯 *{topic}* — test boshlandi! ({len(questions)} savol)")
+        await _edit(cb, f"🎯 *{topic}* — test boshlandi! ({len(questions)} savol)")
     except Exception:  # noqa: BLE001
         pass
     await send_question(cb.message.chat.id, user_id)
@@ -2218,7 +2236,7 @@ async def on_quiz_answer(cb: CallbackQuery) -> None:
         result += f"\n💡 {esc(q['explanation'])}"
 
     try:
-        await cb.message.edit_text(f"{esc(q['question'])}\n\n{result}", parse_mode="HTML")
+        await _edit(cb, f"{esc(q['question'])}\n\n{result}", parse_mode="HTML")
     except Exception:  # noqa: BLE001
         pass
 
@@ -2233,7 +2251,7 @@ async def on_lang_choice(cb: CallbackQuery) -> None:
     names = {"uz": "🇺🇿 O'zbek", "en": "🇬🇧 English", "ru": "🇷🇺 Русский"}
     await cb.answer(f"Til: {names.get(lang, lang)}")
     try:
-        await cb.message.edit_text(f"✅ Til o'zgartirildi: *{names.get(lang, lang)}*")
+        await _edit(cb, f"✅ Til o'zgartirildi: *{names.get(lang, lang)}*")
     except Exception:  # noqa: BLE001
         pass
 
@@ -2252,24 +2270,24 @@ async def on_document(message: Message) -> None:
     doc = message.document
     fname = (doc.file_name or "").lower()
     if not fname.endswith(".pdf"):
-        await message.answer("⚠️ Faqat *PDF* fayl qabul qilinadi.")
+        await _ans(message, "⚠️ Faqat *PDF* fayl qabul qilinadi.")
         return
 
     state = await db.get_user_state(u.id)
     if not state or state["state"] != "pdf_add":
-        await message.answer(
+        await _ans(message, 
             "ℹ️ PDF dan test qo'shish uchun: «🧰 Vositalar → ➕ Savol qo'shish → "
             "📄 PDF dan test» ni tanlang."
         )
         return
 
     if not config.is_admin(u.id, u.username):
-        await message.answer("🔒 PDF dan test qo'shish faqat admin uchun.")
+        await _ans(message, "🔒 PDF dan test qo'shish faqat admin uchun.")
         return
 
     size_mb = (doc.file_size or 0) / (1024 * 1024)
     if size_mb > config.PDF_MAX_MB:
-        await message.answer(
+        await _ans(message, 
             f"⚠️ Fayl juda katta ({size_mb:.1f} MB). Maksimal: {config.PDF_MAX_MB} MB."
         )
         return
@@ -2281,12 +2299,12 @@ async def on_document(message: Message) -> None:
         data = buf.read()
     except Exception as exc:  # noqa: BLE001
         log.exception("PDF yuklab olishda xato: %s", exc)
-        await message.answer("⚠️ PDF faylni yuklab bo'lmadi.")
+        await _ans(message, "⚠️ PDF faylni yuklab bo'lmadi.")
         return
 
     text = extract_pdf_text(data)
     if not text.strip():
-        await message.answer(
+        await _ans(message, 
             "⚠️ PDF dan matn ajratib bo'lmadi (skanerlangan rasm bo'lishi mumkin). "
             "Boshqa PDF yuboring."
         )
@@ -2294,7 +2312,7 @@ async def on_document(message: Message) -> None:
 
     questions = parse_pdf_questions(text)
     if not questions:
-        await message.answer(
+        await _ans(message, 
             "⚠️ PDF da savollar topilmadi. Savollar `1) ...` ko'rinishida "
             "bo'lishi kerak."
         )
@@ -2307,7 +2325,7 @@ async def on_document(message: Message) -> None:
     state["step"] = "code"
     await db.set_user_state(u.id, "pdf_add", state)
 
-    await message.answer(
+    await _ans(message, 
         f"✅ PDF o'qildi: *{len(questions)}* ta savol topildi "
         f"(test: {len(mc)}, ochiq: {len(op)}).\n\n"
         "2️⃣ Endi test uchun *kod* kiriting (masalan: `12345`).\n\n"
@@ -2325,7 +2343,7 @@ async def on_voice(message: Message) -> None:
         await db.register_admin(u.id)
 
     if not config.ENABLE_VOICE:
-        await message.answer("🎙 Ovozli rejim o'chirilgan.")
+        await _ans(message, "🎙 Ovozli rejim o'chirilgan.")
         return
 
     await _typing(message)
@@ -2335,7 +2353,7 @@ async def on_voice(message: Message) -> None:
         data = buf.read()
     except Exception as exc:  # noqa: BLE001
         log.exception("Ovozni yuklab olishda xato: %s", exc)
-        await message.answer("⚠️ Ovozli xabarni yuklab bo'lmadi.")
+        await _ans(message, "⚠️ Ovozli xabarni yuklab bo'lmadi.")
         return
 
     state = await db.get_user_state(u.id)
@@ -2355,7 +2373,7 @@ async def on_voice(message: Message) -> None:
         await db.clear_user_state(u.id)
         return
 
-    # Umumiy ovozli rejim: transkript + javob (suhbat konteksti bilan)
+    # Umumiy ovozli rejim: transkript + javob
     prompt = (
         "Quyidagi ovozli xabarni tingla va matnga o'gir (transkript). "
         "So'ng transkriptdagi savol yoki so'rovga javob ber. "
@@ -2363,10 +2381,8 @@ async def on_voice(message: Message) -> None:
         "🎤 Transkript: <matn>\n\n"
         "💬 Javob: <javob>"
     )
-    context = await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE)
     answer = await _ask_gemini_custom(
-        message, prompt, SYSTEM_PROMPT, image_bytes=data, image_mime="audio/ogg",
-        history=context,
+        message, prompt, SYSTEM_PROMPT, image_bytes=data, image_mime="audio/ogg"
     )
     if answer:
         await db.add_history(u.id, "user", "[ovozli xabar]", source="voice")
@@ -2391,10 +2407,10 @@ async def on_photo(message: Message) -> None:
                                      caption=caption or None)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Kanalga rasm yuborilmadi (%s): %s", cid, exc)
-                await message.answer("⚠️ Kanalga rasm yuborilmadi. Bot admin ekanligini tekshiring.")
+                await _ans(message, "⚠️ Kanalga rasm yuborilmadi. Bot admin ekanligini tekshiring.")
                 return
             await db.clear_user_state(u.id)
-            await message.answer("✅ Rasm kanalga joylandi!", reply_markup=channel_kb())
+            await _ans(message, "✅ Rasm kanalga joylandi!", reply_markup=channel_kb())
             return
 
     await _typing(message)
@@ -2405,7 +2421,7 @@ async def on_photo(message: Message) -> None:
         data = buf.read()
     except Exception as exc:  # noqa: BLE001
         log.exception("Rasm yuklab olishda xato: %s", exc)
-        await message.answer("⚠️ Rasmni yuklab bo'lmadi.")
+        await _ans(message, "⚠️ Rasmni yuklab bo'lmadi.")
         return
 
     caption = (message.caption or "").strip()
@@ -2416,18 +2432,7 @@ async def on_photo(message: Message) -> None:
     if caption:
         prompt += f" Foydalanuvchi so'rovi: {caption}"
 
-    # Suhbat konteksti (oldingi gaplar) — rasm tahlili ham kontekstga bog'lansin
-    context = []
-    if u:
-        context = await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE)
-        await db.add_history(
-            u.id, "user", f"[rasm] {caption}".strip(), source="image"
-        )
-    answer = await _ask_gemini(
-        message, prompt, image_bytes=data, image_mime="image/jpeg", history=context
-    )
-    if u and answer:
-        await db.add_history(u.id, "assistant", answer, source="image")
+    await _ask_gemini(message, prompt, image_bytes=data, image_mime="image/jpeg")
 
 
 @dp.message(F.text, ~F.text.startswith("/"))
@@ -2452,6 +2457,9 @@ async def on_text(message: Message) -> None:
             return
         if st == "speaking":
             await assess_speaking(message, state["data"], text)
+            return
+        if st == "ai_chat":
+            await _ask_gemini(message, text)
             return
         if st == "problem":
             subject = state["data"].get("subject", "math")
@@ -2510,7 +2518,7 @@ async def on_text(message: Message) -> None:
     # 2) Faol test bo'lsa — tugmalardan foydalanishni eslatamiz
     sess = await db.get_quiz_session(u.id)
     if sess:
-        await message.answer(
+        await _ans(message, 
             "🎯 Test davom etmoqda — javobni *tugmalardan* tanlang.\n"
             "Qaytadan boshlash uchun: /quiz"
         )
@@ -2525,10 +2533,8 @@ async def on_text(message: Message) -> None:
         await _safe_send(message, instant["reply"])
         return
 
-    # 4) AI javob (hamma soha) — suhbat konteksti bilan
+    # 4) AI javob (hamma soha)
     topic = detect_topic(text)
-    # Kontekst: joriy xabardan OLDINGI qatlamlar (xronologik tartibda)
-    context = await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE)
     await db.add_history(u.id, "user", text, topic=topic, source="ai")
     await db.bump("ai_requests")
     if topic:
@@ -2536,18 +2542,16 @@ async def on_text(message: Message) -> None:
 
     await _typing(message)
     try:
-        answer = await pool.generate(
-            text, system_instruction=SYSTEM_PROMPT, history=context
-        )
+        answer = await pool.generate(text, system_instruction=SYSTEM_PROMPT)
     except AllKeysFailedError as exc:
         log.error("Gemini xatosi: %s", exc)
-        await message.answer(
+        await _ans(message, 
             "⚠️ Hozircha AI xizmatiga ulanib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
         )
         return
     except Exception as exc:  # noqa: BLE001
         log.exception("Kutilmagan xato: %s", exc)
-        await message.answer("⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
+        await _ans(message, "⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
         return
 
     await db.add_history(u.id, "assistant", answer, topic=topic, source="ai")

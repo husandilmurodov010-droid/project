@@ -28,6 +28,26 @@ ishlaydigan** qilib sozlangan.
 
 ## ✨ Funksiyalar
 
+### 🏠 Asosiy menyu tuzilmasi (v6'da yangilandi)
+Asosiy menyu ostidagi inline tugmalar:
+
+1. **🤖 AI bilan ishlash** — AI bilan erkin suhbat rejimi (har qanday sohada savol).
+2. **🎤 IELTS Speaking** — Part 1/2/3 savollari + ovozli xabar baholash.
+3. **✍️ IELTS Writing** — Task 1/2 + insho baholash.
+4. **➗ Matematika** — misol yechish + testlar.
+5. **⚛️ Fizika** — misol yechish + testlar.
+6. **🧰 Vositalar** — savol qo'shish, kanal boshqaruvi.
+7. **📄 PDF testlarni tekshirish** — kod kiritib javob tekshirish.
+8. **🎯 Testlar (umumiy)** — soha bo'yicha test.
+
+**⬅️ Bosh menyu tugmasi:** bot bergan **har bir javob** tagida «⬅️ Bosh menyu»
+inline tugmasi bo'ladi — bosilganda foydalanuvchi asosiy menyuga qaytadi va
+joriy holat (state) tozalanadi. Bu barcha bo'limlarga tegishli.
+
+**Savol matnlarida `|` belgisi ishlatilmaydi.** Savollar tabiiy, ko'p qatorli
+matn ko'rinishida kiritiladi (birinchi qatorda savol, keyingi qatorlarda
+variantlar; bloklar bo'sh qator bilan ajratiladi).
+
 ### ⚡ Tezkor javob tizimi (instant reply)
 `salom`, `assalomu alaykum`, `rahmat`, `qalaysan`, `sen kimsan` kabi so'z va
 iboralarga **AI'ga murojaat qilmasdan**, bazadan darhol javob beriladi
@@ -57,21 +77,6 @@ adabiyot, umumiy bilim.
 Bot sohani **avtomatik aniqlaydi** (kalit so'z + arifmetik ifoda tahlili) va
 Gemini orqali mos tarzda javob beradi.
 
-### 🧠 Suhbat xotirasi (conversation memory)
-Bot **oldingi gaplarni eslab qoladi** — har bir yangi javob oldingi suhbatga
-bog'lanadi. Har bir foydalanuvchi uchun oxirgi `HISTORY_CONTEXT_SIZE` (default
-**6**) ta qatlam (foydalanuvchi xabari + bot javobi) `chat_history` jadvalida
-saqlanadi va Gemini so'roviga **ko'p bosqichli `contents`** sifatida uzatiladi
-(`role: user` / `role: model`).
-
-Natijada:
-- «tahlil qil», «davom et», «shuni ishlab ber», «yana» kabi so'rovlar **oldingi
-  mavzuga tayanadi** — bot yangidan boshlamaydi va allaqachon berilgan misolni
-  qaytadan so'ramaydi.
-- Ovozli xabar va rasm tahlili ham suhbat kontekstiga bog'lanadi.
-- Yangi suhbat boshlash uchun: **🔄 Suhbatni tozalash** tugmasi yoki `/reset`
-  buyrug'i (tarix tozalanadi, bot oldingi gaplarni unutadi).
-
 ### 🔑 5 ta Gemini kalit — round-robin + failover
 - **Round-robin:** har bir so'rov navbatdagi kalitdan boshlanadi
 - **Failover:** kalit 429/5xx bersa → avtomatik keyingisiga o'tadi
@@ -98,9 +103,9 @@ Asosiy menyu ostidagi **«🧰 Vositalar»** bo'limida endi faqat **2 ta tugma**
   kanalda **admin** ekanligi avtomatik tekshiriladi.
 - **📋 Kanallarim** — ulangan kanallar ro'yxati (o'chirish mumkin).
 - **✍️ Kanalga post** — matn yoki rasmni tanlangan kanalga darhol joylash.
-- **🗓 Post rejalashtirish** — `matn | vaqt` formatida postni rejalashtirish;
-  takrorlash uchun `matn | +1d | 1440` (har 1440 daqiqada). Fon vazifasi
-  (`post_loop`) muddati kelgan postlarni avtomatik yuboradi.
+- **🗓 Post rejalashtirish** — birinchi qatorda post matni, ikkinchi qatorda vaqt;
+  takrorlash uchun uchinchi qatorga daqiqalarni yozing (masalan `1440`). Fon
+  vazifasi (`post_loop`) muddati kelgan postlarni avtomatik yuboradi.
 - Kanal ma'lumotlari bazada saqlanadi (`channels`, `scheduled_posts`).
 
 ### 📄 PDF dan test qo'shish (v5'da qo'shildi)
@@ -172,7 +177,6 @@ Asosiy menyuda **«📄 PDF testlarni tekshirish»** tugmasi bor:
 | `/quiz` | Soha bo'yicha test o'tash |
 | `/stats` | Statistika (foydalanuvchilar, so'rovlar, sohalar) |
 | `/history` | Oxirgi suhbatlar tarixi |
-| `/reset` | Suhbatni tozalash (yangi suhbat — kontekstni unutadi) |
 | `/clearhistory` | Suhbat tarixini tozalash |
 | `/lang` | Til tanlash (uz / en / ru) |
 | `/bank [so'z]` | Savollar banki |
