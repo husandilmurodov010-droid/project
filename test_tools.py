@@ -1,100 +1,184 @@
-"""Tools menu + channel management checks."""
+"""v4 sinovlari: Tools menyusi (2 tugma), savol qo'shish, kanal boshqaruvi.
+
+Ishga tushirish:  python3 test_tools.py
+"""
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
 import tempfile
+import time
 
-PASS, FAIL = [], []
+os.environ.setdefault("BOT_TOKEN", "123456:TESTTOKEN")
+os.environ.setdefault("GEMINI_API_KEYS", "test-key-1,test-key-2")
+os.environ.setdefault("ADMIN_USERNAME", "Husan_Dilmurodov")
+
+PASS = 0
+FAIL = 0
 
 
-def check(name, cond, detail=""):
-    (PASS if cond else FAIL).append(name)
-    print(f"{'✅' if cond else '❌'} {name}{(' — ' + detail) if detail else ''}")
+def check(name: str, cond: bool, extra: str = "") -> None:
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  ✅ {name}")
+    else:
+        FAIL += 1
+        print(f"  ❌ {name} {extra}")
 
 
-async def run():
-    os.environ.setdefault("DB_PATH", tempfile.mktemp(suffix=".db"))
-    os.environ.setdefault("BOT_TOKEN", "123:TEST")
-    os.environ.setdefault("GEMINI_API_KEYS", "dummy")
-    sys.path.insert(0, os.getcwd())
-
-    import json
+async def main() -> None:
+    import config
     from database import Database
-    import bot as B
 
-    db = Database()
+    print("\n=== 1) Tools menyusi: faqat 2 ta tugma ===")
+    import bot as botmod
+
+    kb = botmod.tools_kb()
+    buttons = [b.text for row in kb.inline_keyboard for b in row]
+    # Orqaga tugmasini hisobga olmaymiz
+    action_buttons = [b for b in buttons if "Orqaga" not in b]
+    check("Tools'da 2 ta amal tugmasi", len(action_buttons) == 2,
+          f"(topildi: {action_buttons})")
+    check("«Savol qo'shish» bor", any("Savol qo'shish" in b for b in action_buttons))
+    check("«Kanalga ulash» bor", any("Kanalga ulash" in b for b in action_buttons))
+    check("eski «Ovozli rejim» yo'q", not any("Ovozli rejim" in b for b in buttons))
+    check("eski «Rasm» yo'q", not any("Rasm" in b for b in action_buttons))
+    check("eski «Savollar banki» yo'q", not any("Savollar banki" in b for b in action_buttons))
+
+    print("\n=== 2) Kanal klaviaturasi ===")
+    ckb = botmod.channel_kb()
+    cbtns = [b.text for row in ckb.inline_keyboard for b in row]
+    check("«Kanal ulash» bor", any("Kanal ulash" in b for b in cbtns))
+    check("«Kanalga post» bor", any("Kanalga post" in b for b in cbtns))
+    check("«Post rejalashtirish» bor", any("rejalashtirish" in b for b in cbtns))
+
+    print("\n=== 3) Savol qo'shish klaviaturalari ===")
+    qkb = botmod.qadd_type_kb()
+    qbtns = [b.text for row in qkb.inline_keyboard for b in row]
+    for name in ("IELTS Speaking", "IELTS Writing", "Matematika", "Fizika"):
+        check(f"«{name}» turi bor", any(name in b for b in qbtns))
+
+    print("\n=== 4) Baza: yangi jadvallar ===")
+    tmp = tempfile.mktemp(suffix=".db")
+    db = Database(tmp)
     await db.connect()
-    B.db = db
+    cur = await db.db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    tables = {r["name"] for r in await cur.fetchall()}
+    for t in ("channels", "scheduled_posts", "ielts_speaking_questions",
+              "ielts_writing_tasks", "math_tests", "physics_tests",
+              "test_codes", "test_submissions", "pending_approvals",
+              "reminders", "question_bank"):
+        check(f"jadval: {t}", t in tables)
 
-    # --- Tools menu has exactly 2 action buttons (+ back) ---
-    kb = B.tools_kb()
-    labels = [btn.text for row in kb.inline_keyboard for btn in row]
-    action = [l for l in labels if l != "⬅️ Orqaga"]
-    check("Tools menu has exactly 2 actions", len(action) == 2, str(labels))
-    check("Tools: Savol qo'shish present", any("Savol qo'shish" in l for l in labels))
-    check("Tools: Kanalga ulash present", any("Kanalga ulash" in l for l in labels))
-    for old in ("Ovoz", "Rasm", "Savollar banki"):
-        check(f"Tools has no legacy '{old}' button", not any(old in l for l in labels))
+    print("\n=== 5) Kanal CRUD ===")
+    await db.add_channel(111, -1001234567890, "Test kanal", "test_kanal")
+    ch = await db.get_channel(-1001234567890)
+    check("kanal qo'shildi", ch is not None and ch["title"] == "Test kanal")
+    check("kanal username", ch["username"] == "test_kanal")
+    check("kanal soni = 1", await db.count_channels() == 1)
+    rows = await db.list_channels(111)
+    check("kanal ro'yxati", len(rows) == 1)
+    # Upsert (qayta ulash)
+    await db.add_channel(111, -1001234567890, "Yangi nom", "test_kanal")
+    ch2 = await db.get_channel(-1001234567890)
+    check("kanal upsert (nom yangilandi)", ch2["title"] == "Yangi nom")
+    check("kanal soni hali 1", await db.count_channels() == 1)
 
-    # --- channel CRUD ---
-    await db.add_channel(1, "@mychan", "Mening kanalim", "mychan")
-    await db.add_channel(1, "@mychan", "Mening kanalim v2", "mychan")  # upsert
-    chans = await db.channels(1)
-    check("channel upsert (no duplicate)", len(chans) == 1, f"count={len(chans)}")
-    check("channel title updated on upsert", chans[0]["title"] == "Mening kanalim v2")
-    got = await db.get_channel("@mychan")
-    check("get_channel by id", got is not None)
-    await db.delete_channel("@mychan")
-    check("delete_channel", len(await db.channels(1)) == 0)
+    print("\n=== 6) Rejalashtirilgan postlar ===")
+    now = time.time()
+    pid = await db.add_scheduled_post(-1001234567890, "Salom kanal", now - 1,
+                                      created_by=111)
+    check("post qo'shildi", pid > 0)
+    due = await db.get_due_scheduled_posts()
+    check("muddati kelgan post topildi", len(due) == 1 and due[0]["text"] == "Salom kanal")
+    await db.mark_post_sent(pid)
+    due2 = await db.get_due_scheduled_posts()
+    check("yuborilgach ro'yxatdan chiqdi", len(due2) == 0)
+    # Takrorlanuvchi post
+    pid2 = await db.add_scheduled_post(-1001234567890, "Har kuni", now - 1,
+                                       repeat_minutes=1440, created_by=111)
+    await db.reschedule_post(pid2, now + 86400)
+    pend = await db.list_scheduled_posts(-1001234567890, only_pending=True)
+    check("takrorlanuvchi post qayta rejalashtirildi", len(pend) == 1)
+    await db.delete_scheduled_post(pid2)
+    pend2 = await db.list_scheduled_posts(-1001234567890, only_pending=True)
+    check("post o'chirildi", len(pend2) == 0)
 
-    # --- scheduled posts ---
-    await db.add_post("@chan", "post1", "2026-01-01T00:00:00Z", 0, created_by=1)
-    await db.add_post("@chan", "repeat", "2026-01-01T00:00:00Z", 1440, created_by=1)
-    posts = await db.posts()
-    check("two scheduled posts stored", len(posts) == 2)
-    due = await db.due_posts("2030-01-01T00:00:00Z")
-    check("due posts detected", len(due) == 2)
-    for p in due:
-        await db.mark_post_sent(p["id"], p["repeat_min"] or 0)
-    remaining = await db.posts()
-    check("one-off done, repeating rescheduled", len(remaining) == 1, f"left={len(remaining)}")
+    print("\n=== 7) Savol qo'shish (Speaking/Writing) ===")
+    sid = await db.add_speaking_question(1, "What is your hobby?", topic="hobby")
+    check("Speaking Part 1 savoli qo'shildi", sid > 0)
+    sid2 = await db.add_speaking_question(
+        2, "Describe a book", cue_card="Describe a book",
+        bullets=["what", "why"], prep_seconds=60, speak_seconds=120)
+    check("Speaking Part 2 cue card qo'shildi", sid2 > 0)
+    sp = await db.get_speaking_questions(2, limit=1)
+    check("Part 2 bullets saqlandi", sp and sp[0]["bullets"] == ["what", "why"])
+    wid = await db.add_writing_task(2, "Some people think...", min_words=250)
+    check("Writing Task 2 qo'shildi", wid > 0)
+    wt = await db.get_writing_tasks(2, limit=1)
+    check("Writing min_words", wt and wt[0]["min_words"] == 250)
 
-    # --- addq approval flow ---
-    await db.addq_request(77, "someone", "Someone")
-    check("addq request pending", await db.request_status(77) == "pending")
-    await db.set_request_status(77, "approved")
-    await db.grant_admin(77, granted_by=1)
-    check("addq approved -> admin right", await db.is_admin(77))
+    print("\n=== 8) Admin ruxsat oqimi (addq) ===")
+    aid = await db.create_pending_approval(
+        999, "addq", {"username": "testuser", "first_name": "Test", "user_id": 999})
+    check("ruxsat so'rovi yaratildi", aid > 0)
+    appr = await db.get_pending_approval(aid)
+    check("so'rov holati pending", appr and appr["status"] == "pending")
+    check("so'rov subject=addq", appr["subject"] == "addq")
+    check("payload username", appr["payload"]["username"] == "testuser")
+    await db.set_approval_status(aid, "approved", 111)
+    appr2 = await db.get_pending_approval(aid)
+    check("so'rov tasdiqlandi", appr2["status"] == "approved")
+    # Tasdiqlangach admin sifatida ro'yxatga olish
+    await db.register_admin(999, "testuser")
+    admins = await db.get_registered_admins()
+    check("foydalanuvchi admin bo'ldi", 999 in admins)
 
-    # --- question kinds from tools ---
-    await db.add_question("speaking", "Part 1: Hometown", "Describe your hometown", added_by=1)
-    await db.add_question("writing", "Task 2: Education", "Discuss both views", added_by=1)
-    bank = await db.search_bank(None, 10)
-    check("speaking + writing appended to bank", len(bank) == 2)
-    await db.add_question("math", "Kvadrat tenglama", "x^2-5x+6=0",
-                          meta={"options": ["2,3", "1,6"], "answer": 0}, added_by=1)
-    bank2 = await db.search_bank("tenglama", 5)
-    check("math question searchable", len(bank2) == 1)
+    print("\n=== 9) Test qo'shish oqimi (math) ===")
+    code = await db.next_test_code("math")
+    check("math kodi MATH- prefiksli", code.startswith("MATH-"))
+    await db.add_test("math", code, "Algebra", [{"q": "2+2?", "options": ["3", "4"]}],
+                      "b", created_by=111)
+    t = await db.get_test_by_code(code)
+    check("test bazaga qo'shildi", t is not None and t["title"] == "Algebra")
+    check("test javoblari saqlandi", t["answers"] == "b")
 
-    # --- test-code answer checking ---
-    def grade(code, answers):
-        return code[:len(answers)].lower() == answers.lower()
-    check("test-code grading (abcdfdddd style)", grade("abcdfdddd", "abcdfdddd"))
-    check("test-code grading mismatch detected", not grade("abcdfdddd", "abcdfddde"))
+    print("\n=== 10) Javob tekshirish (abcdfdddd) ===")
+    correct, detail = botmod.check_answers("abcdfdddd", "abcdfdddd")
+    check("to'liq to'g'ri = 9", correct == 9)
+    correct2, detail2 = botmod.check_answers("abcdxxxx", "abcdfdddd")
+    check("qisman to'g'ri = 4", correct2 == 4)
+    check("xatolar tahlili uzunligi", len(detail2) == 9)
+    check("5-savol xato", detail2[4]["ok"] is False)
 
-    # --- time parsing ---
-    for raw, ok in (("Matn | +2h", True), ("Matn | 09:30", True),
-                    ("Matn | 2026-10-16 09:30", True), ("Matn", True)):
-        try:
-            t, iso, rep = B.parse_schedule(raw)
-            check(f"parse_schedule '{raw}'", iso.endswith("Z"))
-        except Exception as e:
-            check(f"parse_schedule '{raw}'", False, str(e))
+    print("\n=== 11) Vaqt tahlili (post rejalashtirish) ===")
+    ts = botmod.parse_reminder_time("+2h")
+    check("+2h tahlil qilindi", ts is not None and ts > time.time())
+    ts2 = botmod.parse_reminder_time("09:30")
+    check("09:30 tahlil qilindi", ts2 is not None)
+    ts3 = botmod.parse_reminder_time("2026-10-20 14:00")
+    check("aniq sana tahlil qilindi", ts3 is not None)
+    check("noto'g'ri vaqt = None", botmod.parse_reminder_time("salom") is None)
+
+    print("\n=== 12) Admin tekshiruvi ===")
+    check("username bo'yicha admin", config.is_admin(1, "Husan_Dilmurodov"))
+    check("begona foydalanuvchi admin emas", not config.is_admin(1, "boshqa"))
 
     await db.close()
-    print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
-    return 1 if FAIL else 0
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+
+    print(f"\n{'=' * 50}")
+    print(f"NATIJA: {PASS} o'tdi, {FAIL} muvaffaqiyatsiz")
+    print(f"{'=' * 50}")
+    sys.exit(1 if FAIL else 0)
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(run()))
+    asyncio.run(main())

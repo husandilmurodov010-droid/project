@@ -1,24 +1,80 @@
-# Secrets - NEVER commit
+# ===========================================================================
+#  AI Manager Bot — .gitignore
+#  Maqsad: maxfiy ma'lumot (token, kalit), baza, log va kesh HECH QACHON
+#  GitHub'ga tushmasin.
+# ===========================================================================
+
+# --- Maxfiy sozlamalar ----------------------------------------------------
 .env
 .env.*
 !.env.example
+*.env
+secrets.json
+credentials.json
 
-# Database / backups
+# --- Ma'lumotlar bazasi (foydalanuvchi ma'lumotlari!) ---------------------
 *.db
-*.db-journal
 *.db-wal
 *.db-shm
-backups/
+*.sqlite
+*.sqlite3
+data/
+!data/.gitkeep
 
-# Logs & runtime
+# --- Loglar ---------------------------------------------------------------
 logs/
 *.log
+*.log.*
+*.gz
+
+# --- Python kesh ----------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtual muhit --------------------------------------------------------
 .venv/
 venv/
+env/
+ENV/
+.python-version
 
-# OS / editor
-.DS_Store
-.idea/
+# --- Test / qamrov --------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+*.cover
+handler_test.db*
+test_*.db*
+
+# --- Tahrirlovchi / OS ----------------------------------------------------
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Render / boshqa platformalar -----------------------------------------
+.render/
+.vercel/
+.netlify/
+
+# --- Zaxira nusxalari -----------------------------------------------------
+*.bak
+*.tmp
+*.orig
+backup_*.json

@@ -1,46 +1,98 @@
+# ===========================================================================
+#  CI — har push va pull request'da kodni tekshiradi.
+#  Maqsad: sintaksis xatosi yoki buzuq YAML/JSON GitHub'ga tushmasin va
+#  Render'ga buzuq deploy ketmasin.
+# ===========================================================================
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["main", "master", "develop"]
   pull_request:
-    branches: [main]
+    branches: ["main", "master"]
+  workflow_dispatch:
 
 jobs:
-  checks:
+  check:
+    name: Sintaksis va format tekshiruvi
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Reponi olish
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Python 3.11 o'rnatish
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: pip
 
-      - name: Install deps
+      - name: Kutubxonalarni o'rnatish
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install flake8 PyYAML
 
-      - name: Syntax check (py_compile)
-        run: python -m py_compile bot.py config.py database.py gemini_pool.py health_server.py watchdog.py backup.py
+      # --- 1) Sintaksis: barcha .py fayllar kompilyatsiya bo'lishi shart ---
+      - name: Python sintaksisi (py_compile)
+        run: |
+          python -m compileall -q . -x '\.venv|__pycache__'
+          echo "✅ Barcha .py fayllar sintaksis jihatdan toza"
 
-      - name: Import smoke test
+      # --- 2) Flake8: haqiqiy xatolar (E9xx) + muhim ogohlantirishlar ---
+      - name: Flake8 (xatolar)
+        run: |
+          flake8 . \
+            --exclude=.venv,__pycache__,logs,data \
+            --max-line-length=120 \
+            --select=E9,F63,F7,F82 \
+            --show-source --statistics
+          echo "✅ Flake8: jiddiy xato topilmadi"
+
+      # --- 3) Import testi: modullar yuklanadimi (config'siz ham) ---
+      - name: Import testi
         env:
-          BOT_TOKEN: "123:TEST"
-          GEMINI_API_KEYS: "dummy"
+          BOT_TOKEN: "1234567890:TEST_TOKEN_FOR_CI"
+          GEMINI_KEY_1: "test_key_ci"
         run: |
-          python -c "import config, gemini_pool, database, health_server, watchdog; print('imports ok')"
+          python -c "import config; print('✅ config OK')"
+          python -c "import gemini_pool; print('✅ gemini_pool OK')"
+          python -c "import database; print('✅ database OK')"
+          python -c "import backup; print('✅ backup OK')"
+          python -c "import health_server; print('✅ health_server OK')"
 
-      - name: Validate JSON data files
+      # --- 4) JSON ma'lumot fayllari to'g'rimi ---
+      - name: JSON validatsiyasi
         run: |
-          for f in *.json; do python -c "import json,sys; json.load(open('$f'))" && echo "OK $f"; done
+          for f in *.json; do
+            python -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8')); print('✅', sys.argv[1])" "$f"
+          done
 
-      - name: Validate YAML
-        run: python -c "import yaml; yaml.safe_load(open('render.yaml'))"
-
-      - name: Security - no secrets committed
+      # --- 5) YAML konfiguratsiyalar to'g'rimi ---
+      - name: YAML validatsiyasi
         run: |
-          if git ls-files | grep -E '(^|/)\.env$|\.db$'; then
-            echo "::error:: .env yoki *.db commit qilingan!"; exit 1
+          python - <<'PY'
+          import glob, sys, yaml
+          files = ["render.yaml"] + glob.glob("deploy/*.yml") + glob.glob(".github/workflows/*.yml")
+          ok = True
+          for f in files:
+              try:
+                  yaml.safe_load(open(f, encoding="utf-8"))
+                  print("✅", f)
+              except Exception as exc:
+                  ok = False
+                  print("❌", f, "->", exc)
+          sys.exit(0 if ok else 1)
+          PY
+
+      # --- 6) Maxfiy ma'lumot GitHub'ga tushib qolmaganini tekshirish ---
+      - name: Maxfiy ma'lumot tekshiruvi
+        run: |
+          echo "Kuzatilayotgan fayllar soni: $(git ls-files | wc -l)"
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "❌ XATO: .env GitHub'ga commit qilingan!"; exit 1
           fi
-          echo "secrets check ok"
+          if git ls-files | grep -E '\.(db|db-wal|db-shm)$'; then
+            echo "❌ XATO: baza fayli commit qilingan!"; exit 1
+          fi
+          echo "✅ .env va baza fayllari commit qilinmagan"

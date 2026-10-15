@@ -1,0 +1,35 @@
+[Unit]
+Description=AI Manager Telegram Bot (@AIManagerProBot)
+Documentation=https://github.com/USERNAME/ai-manager-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mangabot
+Group=mangabot
+WorkingDirectory=/opt/manga-bot
+EnvironmentFile=/opt/manga-bot/.env
+# ✅ start.sh ishlatiladi — ichida avtomatik qayta ishga tushirish sikli bor.
+#    VPS uchun health server shart emas (ENABLE_HEALTH_SERVER=false).
+ExecStart=/usr/bin/env bash /opt/manga-bot/start.sh
+
+# 24/7: bot yiqilsa systemd darhol qayta ko'taradi
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# Loglar journald'ga (journalctl -u ai-manager-bot -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-manager-bot
+
+# Xavfsizlik: minimal huquqlar
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/manga-bot/data /opt/manga-bot/logs
+
+[Install]
+WantedBy=multi-user.target

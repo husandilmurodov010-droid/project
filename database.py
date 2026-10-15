@@ -1,569 +1,1153 @@
-"""SQLite layer (aiosqlite) for AI Manager Bot.
+"""Ma'lumotlar bazasi qatlami (SQLite + aiosqlite).
 
-All tables from the v5 design: users, chat_history, instant_replies,
-quiz_*, stats, ielts_*, math_tests, physics_tests, test_codes, reminders,
-question_bank, user_states, admins, channels, scheduled_posts.
+Asosiy jadvallar:
+  users            — foydalanuvchilar (user_id, ism, til, ro'yxatdan o'tgan vaqt, oxirgi faollik)
+  chat_history     — suhbat tarixi (har bir savol-javob)
+  instant_replies  — tezkor javoblar bazasi (kalit so'z -> javob)
+  quiz_questions   — testlar bazasi (savol, variantlar, to'g'ri javob, mavzu/soha)
+  quiz_sessions    — foydalanuvchining joriy test sessiyasi
+  quiz_results     — test natijalari tarixi
+  stats            — statistika (so'rovlar, sohalar bo'yicha hisob)
+
+Yangi jadvallar (v3):
+  ielts_speaking_questions — IELTS Speaking savollari (Part 1/2/3)
+  ielts_writing_tasks      — IELTS Writing topshiriqlari (Task 1/2)
+  math_tests               — matematika testlari (kod tizimi)
+  physics_tests            — fizika testlari (kod tizimi)
+  test_codes               — test kodlari reyestri (kod -> fan/test)
+  test_submissions         — foydalanuvchi test javoblari tarixi
+  pending_approvals        — admin tasdiqlashini kutayotgan testlar
+  reminders                — foydalanuvchi eslatmalari
+  question_bank            — savollar banki (foydalanuvchi savol-javoblari)
+  user_states              — ko'p qadamli suhbat holati (masalan, test qo'shish)
+
+Barcha metodlar async va xavfsiz (WAL rejimi, parametrlangan so'rovlar).
 """
+from __future__ import annotations
+
 import json
 import logging
-import os
 import time
+from pathlib import Path
+from typing import Any, Optional
 
 import aiosqlite
 
-from config import (
-    ADMIN_ID,
-    ADMIN_USERNAME,
-    DEFAULT_LANG,
-    QUIZ_QUESTIONS_PER_SESSION,
-    DB_PATH,
-)
-
 log = logging.getLogger("db")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Fan -> jadval nomi
+_TEST_TABLES = {"math": "math_tests", "physics": "physics_tests"}
 
 SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+
 CREATE TABLE IF NOT EXISTS users (
     user_id       INTEGER PRIMARY KEY,
     username      TEXT,
     first_name    TEXT,
-    lang          TEXT DEFAULT 'uz',
-    joined_at     TEXT,
-    last_seen     TEXT,
+    language      TEXT    DEFAULT 'uz',
+    created_at    REAL    NOT NULL,
+    last_seen     REAL    NOT NULL,
     msg_count     INTEGER DEFAULT 0
 );
+
 CREATE TABLE IF NOT EXISTS chat_history (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id       INTEGER,
-    role          TEXT,
-    text          TEXT,
-    topic         TEXT,
-    source        TEXT,
-    created_at    TEXT
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    role       TEXT    NOT NULL,          -- 'user' | 'assistant'
+    text       TEXT    NOT NULL,
+    topic      TEXT,                      -- aniqlangan soha
+    source     TEXT,                      -- 'instant' | 'ai' | 'quiz'
+    created_at REAL    NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_hist_user ON chat_history(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_history_user ON chat_history(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS instant_replies (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    keyword       TEXT UNIQUE,
-    reply         TEXT,
-    category      TEXT DEFAULT 'general',
-    priority      INTEGER DEFAULT 0,
-    uses          INTEGER DEFAULT 0
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword    TEXT    NOT NULL UNIQUE,   -- normallashtirilgan kalit so'z
+    reply      TEXT    NOT NULL,
+    category   TEXT    DEFAULT 'general',
+    priority   INTEGER DEFAULT 0,
+    hits       INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS quiz_questions (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    subject       TEXT,
-    question      TEXT,
-    options       TEXT,
-    answer        INTEGER,
-    explanation   TEXT
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic      TEXT    NOT NULL,          -- soha: matematika, tarix, ...
+    question   TEXT    NOT NULL,
+    options    TEXT    NOT NULL,          -- JSON massiv
+    answer     INTEGER NOT NULL,          -- to'g'ri variant indeksi (0-based)
+    explanation TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_quiz_topic ON quiz_questions(topic);
+
 CREATE TABLE IF NOT EXISTS quiz_sessions (
-    user_id       INTEGER PRIMARY KEY,
-    subject       TEXT,
-    question_ids  TEXT,
-    pos           INTEGER DEFAULT 0,
-    score         INTEGER DEFAULT 0,
-    started_at    TEXT,
-    updated_at    TEXT
+    user_id    INTEGER PRIMARY KEY,
+    topic      TEXT    NOT NULL,
+    question_ids TEXT  NOT NULL,          -- JSON massiv
+    current    INTEGER DEFAULT 0,
+    score      INTEGER DEFAULT 0,
+    answers    TEXT    DEFAULT '[]',      -- JSON: [{"q":id,"chosen":i,"correct":bool}]
+    started_at REAL    NOT NULL
 );
+
 CREATE TABLE IF NOT EXISTS quiz_results (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id       INTEGER,
-    subject       TEXT,
-    score         INTEGER,
-    total         INTEGER,
-    created_at    TEXT
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    topic      TEXT    NOT NULL,
+    score      INTEGER NOT NULL,
+    total      INTEGER NOT NULL,
+    created_at REAL    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS stats (
-    key           TEXT PRIMARY KEY,
-    value         INTEGER DEFAULT 0
+    key        TEXT PRIMARY KEY,
+    value      INTEGER DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS question_bank (
+-- ===================== v3: yangi jadvallar =====================
+
+CREATE TABLE IF NOT EXISTS ielts_speaking_questions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind          TEXT,
-    title         TEXT,
-    body          TEXT,
-    meta          TEXT,
-    code          TEXT,
-    added_by      INTEGER,
-    created_at    TEXT
+    part          INTEGER NOT NULL,       -- 1 | 2 | 3
+    topic         TEXT    DEFAULT '',
+    question      TEXT    NOT NULL,
+    cue_card      TEXT    DEFAULT '',     -- Part 2 uchun
+    bullets       TEXT    DEFAULT '[]',   -- Part 2 cue card bandlari (JSON)
+    prep_seconds  INTEGER DEFAULT 0,      -- Part 2: 60
+    speak_seconds INTEGER DEFAULT 0       -- Part 2: 120
+);
+CREATE INDEX IF NOT EXISTS idx_speaking_part ON ielts_speaking_questions(part);
+
+CREATE TABLE IF NOT EXISTS ielts_writing_tasks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task       INTEGER NOT NULL,          -- 1 | 2
+    prompt     TEXT    NOT NULL,
+    kind       TEXT    DEFAULT '',        -- 'graph' | 'letter' | 'opinion' | ...
+    min_words  INTEGER DEFAULT 150
+);
+CREATE INDEX IF NOT EXISTS idx_writing_task ON ielts_writing_tasks(task);
+
+CREATE TABLE IF NOT EXISTS math_tests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT    NOT NULL UNIQUE,   -- MATH-0001
+    title      TEXT    NOT NULL,
+    questions  TEXT    NOT NULL,          -- JSON: [{"q":..,"options":[..]}]
+    answers    TEXT    NOT NULL,          -- 'abcdfdddd' ko'rinishida
+    created_by INTEGER,
+    created_at REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS physics_tests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT    NOT NULL UNIQUE,   -- PHY-0001
+    title      TEXT    NOT NULL,
+    questions  TEXT    NOT NULL,
+    answers    TEXT    NOT NULL,
+    created_by INTEGER,
+    created_at REAL    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS test_codes (
-    code          TEXT PRIMARY KEY,
-    kind          TEXT,
-    title         TEXT,
-    payload       TEXT,
-    created_by    INTEGER,
-    created_at    TEXT
+    code       TEXT    PRIMARY KEY,
+    subject    TEXT    NOT NULL,          -- 'math' | 'physics'
+    test_id    INTEGER NOT NULL,
+    created_at REAL    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS math_tests (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    code          TEXT,
-    question      TEXT,
-    options       TEXT,
-    answer        INTEGER
+CREATE TABLE IF NOT EXISTS test_submissions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    code       TEXT    NOT NULL,
+    subject    TEXT    NOT NULL,
+    answers    TEXT    NOT NULL,          -- foydalanuvchi yuborgan 'abcdfdddd'
+    correct    INTEGER NOT NULL,
+    total      INTEGER NOT NULL,
+    detail     TEXT    DEFAULT '[]',      -- JSON: har savol bo'yicha tahlil
+    created_at REAL    NOT NULL
 );
-CREATE TABLE IF NOT EXISTS physics_tests (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    code          TEXT,
-    question      TEXT,
-    options       TEXT,
-    answer        INTEGER
+CREATE INDEX IF NOT EXISTS idx_sub_user ON test_submissions(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    subject    TEXT    NOT NULL,
+    payload    TEXT    NOT NULL,          -- JSON: test ma'lumotlari
+    status     TEXT    DEFAULT 'pending', -- 'pending' | 'approved' | 'rejected'
+    created_at REAL    NOT NULL,
+    decided_by INTEGER,
+    decided_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS reminders (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id       INTEGER,
-    text          TEXT,
-    due_at        TEXT,
-    repeat_min    INTEGER DEFAULT 0,
-    sent          INTEGER DEFAULT 0,
-    created_at    TEXT
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    text       TEXT    NOT NULL,
+    remind_at  REAL    NOT NULL,          -- unix timestamp
+    sent       INTEGER DEFAULT 0,
+    created_at REAL    NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_rem_due ON reminders(sent, remind_at);
+
+CREATE TABLE IF NOT EXISTS question_bank (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER,
+    subject    TEXT    DEFAULT 'umumiy',
+    question   TEXT    NOT NULL,
+    answer     TEXT    NOT NULL,
+    created_at REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_qbank_subject ON question_bank(subject);
 
 CREATE TABLE IF NOT EXISTS user_states (
-    user_id       INTEGER PRIMARY KEY,
-    state         TEXT,
-    payload       TEXT,
-    updated_at    TEXT
+    user_id    INTEGER PRIMARY KEY,
+    state      TEXT    NOT NULL,
+    data       TEXT    DEFAULT '{}',
+    updated_at REAL    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS admins (
-    user_id       INTEGER PRIMARY KEY,
-    username      TEXT,
-    granted_by    INTEGER,
-    created_at    TEXT
+    user_id    INTEGER PRIMARY KEY,
+    username   TEXT,
+    added_at   REAL    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS addq_requests (
-    user_id       INTEGER PRIMARY KEY,
-    username      TEXT,
-    first_name    TEXT,
-    status        TEXT,
-    created_at    TEXT
-);
+-- ===================== v4: kanal boshqaruvi =====================
 
 CREATE TABLE IF NOT EXISTS channels (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_id      INTEGER,
-    channel_id    TEXT UNIQUE,
-    title         TEXT,
-    username      TEXT,
-    connected_at  TEXT
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id     INTEGER NOT NULL,
+    channel_id   INTEGER NOT NULL UNIQUE,   -- -100...
+    title        TEXT    DEFAULT '',
+    username     TEXT    DEFAULT '',
+    connected_at REAL    NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_channels_owner ON channels(owner_id);
+
 CREATE TABLE IF NOT EXISTS scheduled_posts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id    TEXT,
-    text          TEXT,
-    media         TEXT,
-    run_at        TEXT,
-    repeat_min    INTEGER DEFAULT 0,
-    sent_count    INTEGER DEFAULT 0,
-    done          INTEGER DEFAULT 0,
-    created_by    INTEGER,
-    created_at    TEXT
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id     INTEGER NOT NULL,
+    text           TEXT    DEFAULT '',
+    media_type     TEXT    DEFAULT '',      -- '' | 'photo' | 'document'
+    media_file_id  TEXT    DEFAULT '',
+    run_at         REAL    NOT NULL,
+    repeat_minutes INTEGER DEFAULT 0,       -- 0 = bir marta
+    sent           INTEGER DEFAULT 0,
+    created_by     INTEGER,
+    created_at     REAL    NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_spost_due ON scheduled_posts(sent, run_at);
 """
 
 
-def now_iso():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
 class Database:
-    def __init__(self, path=None):
-        self.path = path or DB_PATH
-        self.conn = None
+    """SQLite bilan ishlash uchun yupqa async qatlam."""
 
-    async def connect(self):
-        self.conn = await aiosqlite.connect(self.path)
-        self.conn.row_factory = aiosqlite.Row
-        await self.conn.execute("PRAGMA journal_mode=WAL")
-        await self.conn.execute("PRAGMA synchronous=NORMAL")
-        await self.conn.executescript(SCHEMA)
-        await self.conn.commit()
-        await self._bootstrap()
-        log.info("database ready at %s", self.path)
+    def __init__(self, path: str = "bot.db") -> None:
+        self.path = path
+        self._db: Optional[aiosqlite.Connection] = None
 
-    async def close(self):
-        if self.conn:
-            await self.conn.close()
+    # ------------------------------------------------------------------ #
+    # Ulanish
+    # ------------------------------------------------------------------ #
+    async def connect(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._db = await aiosqlite.connect(self.path)
+        self._db.row_factory = aiosqlite.Row
+        await self._db.executescript(SCHEMA)
+        await self._db.commit()
+        log.info("Ma'lumotlar bazasi tayyor: %s", self.path)
 
-    # ---------------------------------------------------------- bootstrap
-    async def _bootstrap(self):
-        await self._seed_instant_replies()
-        await self._seed_quiz()
-        await self._seed_admin()
+    async def close(self) -> None:
+        if self._db:
+            await self._db.close()
+            self._db = None
 
-    async def _seed_admin(self):
-        uid = None
-        raw = (ADMIN_ID or "").split(",")[0].strip()
-        if raw.isdigit():
-            uid = int(raw)
-        if uid:
-            await self.conn.execute(
-                "INSERT OR IGNORE INTO admins(user_id, username, granted_by, created_at) VALUES(?,?,?,?)",
-                (uid, ADMIN_USERNAME, uid, now_iso()),
-            )
-            await self.conn.commit()
+    @property
+    def db(self) -> aiosqlite.Connection:
+        if self._db is None:
+            raise RuntimeError("Baza ulanmagan — avval connect() chaqiring.")
+        return self._db
 
-    async def _seed_instant_replies(self):
-        cur = await self.conn.execute("SELECT COUNT(*) AS c FROM instant_replies")
-        row = await cur.fetchone()
-        if row and row["c"]:
-            return
-        rows = _load_json("instant_replies.json", [])
-        for item in rows:
-            await self.conn.execute(
-                "INSERT OR IGNORE INTO instant_replies(keyword, reply, category, priority) VALUES(?,?,?,?)",
-                (item.get("keyword", "").lower().strip(), item.get("reply", ""),
-                 item.get("category", "general"), item.get("priority", 0)),
-            )
-        await self.conn.commit()
-        log.info("seeded %d instant replies", len(rows))
-
-    async def _seed_quiz(self):
-        cur = await self.conn.execute("SELECT COUNT(*) AS c FROM quiz_questions")
-        row = await cur.fetchone()
-        if row and row["c"]:
-            return
-        rows = _load_json("quiz_data.json", [])
-        for q in rows:
-            await self.conn.execute(
-                "INSERT INTO quiz_questions(subject, question, options, answer, explanation) VALUES(?,?,?,?,?)",
-                (q.get("subject", "umumiy"), q.get("question", ""),
-                 json.dumps(q.get("options", []), ensure_ascii=False),
-                 int(q.get("answer", 0)), q.get("explanation", "")),
-            )
-        await self.conn.commit()
-        log.info("seeded %d quiz questions", len(rows))
-
-    # ---------------------------------------------------------- users
-    async def upsert_user(self, user_id, username=None, first_name=None):
-        ts = now_iso()
-        await self.conn.execute(
-            """INSERT INTO users(user_id, username, first_name, lang, joined_at, last_seen, msg_count)
-               VALUES(?,?,?,?,?,?,1)
-               ON CONFLICT(user_id) DO UPDATE SET
-                 username=COALESCE(excluded.username, users.username),
-                 first_name=COALESCE(excluded.first_name, users.first_name),
-                 last_seen=excluded.last_seen,
-                 msg_count=users.msg_count+1""",
-            (user_id, username, first_name, DEFAULT_LANG, ts, ts),
+    # ------------------------------------------------------------------ #
+    # Foydalanuvchilar
+    # ------------------------------------------------------------------ #
+    async def upsert_user(
+        self,
+        user_id: int,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+    ) -> None:
+        now = time.time()
+        await self.db.execute(
+            """
+            INSERT INTO users (user_id, username, first_name, created_at, last_seen, msg_count)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username   = COALESCE(excluded.username, users.username),
+                first_name = COALESCE(excluded.first_name, users.first_name),
+                last_seen  = excluded.last_seen,
+                msg_count  = users.msg_count + 1
+            """,
+            (user_id, username, first_name, now, now),
         )
-        await self.conn.commit()
+        await self.db.commit()
 
-    async def get_lang(self, user_id):
-        cur = await self.conn.execute("SELECT lang FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row["lang"] if row and row["lang"] else DEFAULT_LANG
-
-    async def set_lang(self, user_id, lang):
-        await self.upsert_user(user_id)
-        await self.conn.execute("UPDATE users SET lang=? WHERE user_id=?", (lang, user_id))
-        await self.conn.commit()
-
-    # ---------------------------------------------------------- history
-    async def add_history(self, user_id, role, text, topic=None, source="ai"):
-        await self.conn.execute(
-            "INSERT INTO chat_history(user_id, role, text, topic, source, created_at) VALUES(?,?,?,?,?,?)",
-            (user_id, role, text, topic, source, now_iso()),
-        )
-        await self.conn.commit()
-
-    async def recent_history(self, user_id, limit=8):
-        cur = await self.conn.execute(
-            "SELECT role, text FROM chat_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
-        )
-        rows = await cur.fetchall()
-        return [{"role": r["role"], "text": r["text"]} for r in reversed(rows)]
-
-    async def history(self, user_id, limit=20):
-        cur = await self.conn.execute(
-            "SELECT role, text, created_at FROM chat_history WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
-        )
-        return [dict(r) for r in await cur.fetchall()]
-
-    async def clear_history(self, user_id):
-        await self.conn.execute("DELETE FROM chat_history WHERE user_id=?", (user_id,))
-        await self.conn.commit()
-
-    # ---------------------------------------------------------- instant replies
-    async def instant_reply(self, text):
-        key = (text or "").strip().lower()
-        if not key:
-            return None
-        cur = await self.conn.execute(
-            """SELECT id, reply FROM instant_replies
-               WHERE ? = keyword OR ? LIKE keyword || '%'
-               ORDER BY priority DESC, LENGTH(keyword) DESC LIMIT 1""",
-            (key, key),
-        )
-        row = await cur.fetchone()
-        if not row:
-            return None
-        await self.conn.execute("UPDATE instant_replies SET uses=uses+1 WHERE id=?", (row["id"],))
-        await self.conn.commit()
-        return row["reply"]
-
-    # ---------------------------------------------------------- quiz
-    async def quiz_subjects(self):
-        cur = await self.conn.execute(
-            "SELECT subject, COUNT(*) AS c FROM quiz_questions GROUP BY subject ORDER BY c DESC"
-        )
-        return [(r["subject"], r["c"]) for r in await cur.fetchall()]
-
-    async def start_quiz(self, user_id, subject):
-        cur = await self.conn.execute(
-            "SELECT id FROM quiz_questions WHERE subject=? ORDER BY RANDOM() LIMIT ?",
-            (subject, QUIZ_QUESTIONS_PER_SESSION),
-        )
-        ids = [r["id"] for r in await cur.fetchall()]
-        if not ids:
-            return []
-        ts = now_iso()
-        await self.conn.execute(
-            """INSERT INTO quiz_sessions(user_id, subject, question_ids, pos, score, started_at, updated_at)
-               VALUES(?,?,?,0,0,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET subject=excluded.subject,
-                 question_ids=excluded.question_ids, pos=0, score=0, updated_at=excluded.updated_at""",
-            (user_id, subject, json.dumps(ids), ts, ts),
-        )
-        await self.conn.commit()
-        return ids
-
-    async def quiz_session(self, user_id):
-        cur = await self.conn.execute("SELECT * FROM quiz_sessions WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        d["question_ids"] = json.loads(d["question_ids"] or "[]")
-        return d
-
-    async def quiz_question(self, qid):
-        cur = await self.conn.execute("SELECT * FROM quiz_questions WHERE id=?", (qid,))
-        row = await cur.fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        d["options"] = json.loads(d["options"] or "[]")
-        return d
-
-    async def advance_quiz(self, user_id, correct):
-        s = await self.quiz_session(user_id)
-        if not s:
-            return None
-        pos = s["pos"] + 1
-        score = s["score"] + (1 if correct else 0)
-        await self.conn.execute(
-            "UPDATE quiz_sessions SET pos=?, score=?, updated_at=? WHERE user_id=?",
-            (pos, score, now_iso(), user_id),
-        )
-        await self.conn.commit()
-        return {"pos": pos, "score": score, "total": len(s["question_ids"]), "subject": s["subject"]}
-
-    async def finish_quiz(self, user_id, subject, score, total):
-        await self.conn.execute(
-            "INSERT INTO quiz_results(user_id, subject, score, total, created_at) VALUES(?,?,?,?,?)",
-            (user_id, subject, score, total, now_iso()),
-        )
-        await self.conn.execute("DELETE FROM quiz_sessions WHERE user_id=?", (user_id,))
-        await self.conn.commit()
-
-    # ---------------------------------------------------------- question bank / addq
-    async def add_question(self, kind, title, body, meta=None, code=None, added_by=None):
-        await self.conn.execute(
-            """INSERT INTO question_bank(kind, title, body, meta, code, added_by, created_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (kind, title, body, json.dumps(meta or {}, ensure_ascii=False), code, added_by, now_iso()),
-        )
-        await self.conn.commit()
-
-    async def search_bank(self, word=None, limit=20):
-        if word:
-            cur = await self.conn.execute(
-                "SELECT id, kind, title, code FROM question_bank WHERE title LIKE ? OR body LIKE ? ORDER BY id DESC LIMIT ?",
-                (f"%{word}%", f"%{word}%", limit),
-            )
-        else:
-            cur = await self.conn.execute(
-                "SELECT id, kind, title, code FROM question_bank ORDER BY id DESC LIMIT ?", (limit,))
-        return [dict(r) for r in await cur.fetchall()]
-
-    async def bank_count(self):
-        cur = await self.conn.execute("SELECT COUNT(*) AS c FROM question_bank")
-        row = await cur.fetchone()
-        return row["c"] if row else 0
-
-    async def is_admin(self, user_id):
-        cur = await self.conn.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
-        return (await cur.fetchone()) is not None
-
-    async def grant_admin(self, user_id, username=None, granted_by=None):
-        await self.conn.execute(
-            "INSERT OR IGNORE INTO admins(user_id, username, granted_by, created_at) VALUES(?,?,?,?)",
-            (user_id, username, granted_by, now_iso()),
-        )
-        await self.conn.commit()
-
-    async def addq_request(self, user_id, username, first_name):
-        await self.conn.execute(
-            """INSERT INTO addq_requests(user_id, username, first_name, status, created_at)
-               VALUES(?,?,?,'pending',?)
-               ON CONFLICT(user_id) DO UPDATE SET status='pending', created_at=excluded.created_at""",
-            (user_id, username, first_name, now_iso()),
-        )
-        await self.conn.commit()
-
-    async def request_status(self, user_id):
-        cur = await self.conn.execute("SELECT status FROM addq_requests WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return row["status"] if row else None
-
-    async def set_request_status(self, user_id, status):
-        await self.conn.execute("UPDATE addq_requests SET status=? WHERE user_id=?", (status, user_id))
-        await self.conn.commit()
-
-    # ---------------------------------------------------------- channels / posts
-    async def add_channel(self, owner_id, channel_id, title, username):
-        await self.conn.execute(
-            """INSERT INTO channels(owner_id, channel_id, title, username, connected_at)
-               VALUES(?,?,?,?,?)
-               ON CONFLICT(channel_id) DO UPDATE SET owner_id=excluded.owner_id,
-                 title=excluded.title, username=excluded.username""",
-            (owner_id, str(channel_id), title, username, now_iso()),
-        )
-        await self.conn.commit()
-
-    async def channels(self, owner_id=None):
-        if owner_id:
-            cur = await self.conn.execute(
-                "SELECT * FROM channels WHERE owner_id=? ORDER BY id DESC", (owner_id,))
-        else:
-            cur = await self.conn.execute("SELECT * FROM channels ORDER BY id DESC")
-        return [dict(r) for r in await cur.fetchall()]
-
-    async def get_channel(self, channel_id):
-        cur = await self.conn.execute("SELECT * FROM channels WHERE channel_id=?", (str(channel_id),))
+    async def get_user(self, user_id: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def delete_channel(self, channel_id):
-        await self.conn.execute("DELETE FROM channels WHERE channel_id=?", (str(channel_id),))
-        await self.conn.commit()
+    async def set_language(self, user_id: int, lang: str) -> None:
+        await self.db.execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id))
+        await self.db.commit()
 
-    async def add_post(self, channel_id, text, run_at, repeat_min=0, media=None, created_by=None):
-        await self.conn.execute(
-            """INSERT INTO scheduled_posts(channel_id, text, media, run_at, repeat_min, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (str(channel_id), text, media, run_at, repeat_min, created_by, now_iso()),
+    async def get_language(self, user_id: int) -> str:
+        user = await self.get_user(user_id)
+        return (user or {}).get("language") or "uz"
+
+    async def count_users(self) -> int:
+        cur = await self.db.execute("SELECT COUNT(*) AS c FROM users")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ------------------------------------------------------------------ #
+    # Suhbat tarixi
+    # ------------------------------------------------------------------ #
+    async def add_history(
+        self,
+        user_id: int,
+        role: str,
+        text: str,
+        topic: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO chat_history (user_id, role, text, topic, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, role, text[:4000], topic, source, time.time()),
         )
-        await self.conn.commit()
+        await self.db.commit()
 
-    async def due_posts(self, now_iso_str):
-        cur = await self.conn.execute(
-            "SELECT * FROM scheduled_posts WHERE done=0 AND run_at<=? ORDER BY run_at LIMIT 20",
-            (now_iso_str,),
+    async def get_history(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT role, text, topic, source, created_at
+            FROM chat_history WHERE user_id = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (user_id, limit),
         )
-        return [dict(r) for r in await cur.fetchall()]
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
-    async def mark_post_sent(self, post_id, repeat_min):
-        if repeat_min and repeat_min > 0:
-            cur = await self.conn.execute("SELECT run_at, sent_count FROM scheduled_posts WHERE id=?", (post_id,))
-            row = await cur.fetchone()
-            import datetime as _dt
-            base = _dt.datetime.strptime(row["run_at"], "%Y-%m-%dT%H:%M:%SZ") if row else _dt.datetime.utcnow()
-            nxt = (base + _dt.timedelta(minutes=repeat_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            await self.conn.execute(
-                "UPDATE scheduled_posts SET run_at=?, sent_count=sent_count+1 WHERE id=?", (nxt, post_id))
-        else:
-            await self.conn.execute(
-                "UPDATE scheduled_posts SET done=1, sent_count=sent_count+1 WHERE id=?", (post_id,))
-        await self.conn.commit()
+    async def clear_history(self, user_id: int) -> None:
+        await self.db.execute("DELETE FROM chat_history WHERE user_id = ?", (user_id,))
+        await self.db.commit()
 
-    async def posts(self, limit=20):
-        cur = await self.conn.execute(
-            "SELECT * FROM scheduled_posts WHERE done=0 ORDER BY run_at LIMIT ?", (limit,))
-        return [dict(r) for r in await cur.fetchall()]
+    # ------------------------------------------------------------------ #
+    # Tezkor javoblar
+    # ------------------------------------------------------------------ #
+    async def load_instant_replies(self, items: list[dict[str, Any]]) -> int:
+        """JSON bazasidan tezkor javoblarni yuklaydi (mavjudlarini yangilaydi)."""
+        count = 0
+        for it in items:
+            kw = (it.get("keyword") or "").strip().lower()
+            reply = it.get("reply")
+            if not kw or not reply:
+                continue
+            await self.db.execute(
+                """
+                INSERT INTO instant_replies (keyword, reply, category, priority)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(keyword) DO UPDATE SET
+                    reply    = excluded.reply,
+                    category = excluded.category,
+                    priority = excluded.priority
+                """,
+                (kw, reply, it.get("category", "general"), int(it.get("priority", 0))),
+            )
+            count += 1
+        await self.db.commit()
+        log.info("Tezkor javoblar yuklandi: %d ta", count)
+        return count
 
-    async def delete_post(self, post_id):
-        await self.conn.execute("DELETE FROM scheduled_posts WHERE id=?", (post_id,))
-        await self.conn.commit()
-
-    # ---------------------------------------------------------- states
-    async def set_state(self, user_id, state, payload=None):
-        await self.conn.execute(
-            """INSERT INTO user_states(user_id, state, payload, updated_at) VALUES(?,?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET state=excluded.state,
-                 payload=excluded.payload, updated_at=excluded.updated_at""",
-            (user_id, state, json.dumps(payload or {}, ensure_ascii=False), now_iso()),
+    async def get_instant_reply(self, keyword: str) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM instant_replies WHERE keyword = ?", (keyword.strip().lower(),)
         )
-        await self.conn.commit()
-
-    async def get_state(self, user_id):
-        cur = await self.conn.execute("SELECT state, payload FROM user_states WHERE user_id=?", (user_id,))
         row = await cur.fetchone()
         if not row:
-            return None, {}
-        return row["state"], json.loads(row["payload"] or "{}")
-
-    async def clear_state(self, user_id):
-        await self.conn.execute("DELETE FROM user_states WHERE user_id=?", (user_id,))
-        await self.conn.commit()
-
-    # ---------------------------------------------------------- stats
-    async def bump(self, key, amount=1):
-        await self.conn.execute(
-            """INSERT INTO stats(key, value) VALUES(?,?)
-               ON CONFLICT(key) DO UPDATE SET value=stats.value+?""",
-            (key, amount, amount),
+            return None
+        await self.db.execute(
+            "UPDATE instant_replies SET hits = hits + 1 WHERE id = ?", (row["id"],)
         )
-        await self.conn.commit()
+        await self.db.commit()
+        d = dict(row)
+        d["hits"] = int(d.get("hits", 0)) + 1  # yangilangan qiymatni qaytaramiz
+        return d
 
-    async def counters(self):
-        cur = await self.conn.execute("SELECT key, value FROM stats")
-        return {r["key"]: r["value"] for r in await cur.fetchall()}
+    async def count_instant_replies(self) -> int:
+        cur = await self.db.execute("SELECT COUNT(*) AS c FROM instant_replies")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
 
-    async def overview(self):
-        out = {}
-        for name, sql in (
-            ("users", "SELECT COUNT(*) c FROM users"),
-            ("messages", "SELECT COUNT(*) c FROM chat_history"),
-            ("questions", "SELECT COUNT(*) c FROM question_bank"),
-            ("quiz_questions", "SELECT COUNT(*) c FROM quiz_questions"),
-            ("channels", "SELECT COUNT(*) c FROM channels"),
-            ("scheduled", "SELECT COUNT(*) c FROM scheduled_posts WHERE done=0"),
-        ):
-            cur = await self.conn.execute(sql)
-            out[name] = (await cur.fetchone())["c"]
-        cur = await self.conn.execute(
-            "SELECT subject, COUNT(*) c FROM chat_history WHERE topic IS NOT NULL GROUP BY subject=subject")
+    # ------------------------------------------------------------------ #
+    # Testlar (quiz)
+    # ------------------------------------------------------------------ #
+    async def load_quiz_questions(self, items: list[dict[str, Any]]) -> int:
+        """JSON bazasidan test savollarini yuklaydi (dublikatlarni o'tkazib yuboradi)."""
+        count = 0
+        for it in items:
+            q = (it.get("question") or "").strip()
+            opts = it.get("options") or []
+            if not q or len(opts) < 2:
+                continue
+            cur = await self.db.execute(
+                "SELECT id FROM quiz_questions WHERE question = ?", (q,)
+            )
+            if await cur.fetchone():
+                continue
+            await self.db.execute(
+                """
+                INSERT INTO quiz_questions (topic, question, options, answer, explanation)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    it.get("topic", "umumiy"),
+                    q,
+                    json.dumps(opts, ensure_ascii=False),
+                    int(it.get("answer", 0)),
+                    it.get("explanation", ""),
+                ),
+            )
+            count += 1
+        await self.db.commit()
+        log.info("Test savollari yuklandi: %d ta yangi", count)
+        return count
+
+    async def get_topics(self) -> list[str]:
+        cur = await self.db.execute(
+            "SELECT DISTINCT topic FROM quiz_questions ORDER BY topic"
+        )
+        rows = await cur.fetchall()
+        return [r["topic"] for r in rows]
+
+    async def count_questions(self, topic: Optional[str] = None) -> int:
+        if topic:
+            cur = await self.db.execute(
+                "SELECT COUNT(*) AS c FROM quiz_questions WHERE topic = ?", (topic,)
+            )
+        else:
+            cur = await self.db.execute("SELECT COUNT(*) AS c FROM quiz_questions")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def pick_questions(self, topic: str, n: int = 5) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM quiz_questions WHERE topic = ? ORDER BY RANDOM() LIMIT ?",
+            (topic, n),
+        )
+        rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["options"] = json.loads(d["options"])
+            out.append(d)
         return out
 
-    async def top_topics(self, limit=8):
-        cur = await self.conn.execute(
-            "SELECT topic, COUNT(*) c FROM chat_history WHERE topic IS NOT NULL "
-            "GROUP BY topic ORDER BY c DESC LIMIT ?", (limit,))
-        return [(r["topic"], r["c"]) for r in await cur.fetchall()]
+    # --- Sessiya ---
+    async def start_quiz(self, user_id: int, topic: str, question_ids: list[int]) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO quiz_sessions (user_id, topic, question_ids, current, score, answers, started_at)
+            VALUES (?, ?, ?, 0, 0, '[]', ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                topic = excluded.topic,
+                question_ids = excluded.question_ids,
+                current = 0,
+                score = 0,
+                answers = '[]',
+                started_at = excluded.started_at
+            """,
+            (user_id, topic, json.dumps(question_ids), time.time()),
+        )
+        await self.db.commit()
 
+    async def get_quiz_session(self, user_id: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM quiz_sessions WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["question_ids"] = json.loads(d["question_ids"])
+        d["answers"] = json.loads(d["answers"])
+        return d
 
-# ---------------------------------------------------------------- seeding
-def _load_json(name, default):
-    path = os.path.join(BASE_DIR, name)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError) as e:
-        log.warning("cannot load %s: %s", name, e)
-        return default
+    async def get_question(self, qid: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute("SELECT * FROM quiz_questions WHERE id = ?", (qid,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["options"] = json.loads(d["options"])
+        return d
+
+    async def record_answer(self, user_id: int, qid: int, chosen: int, correct: bool) -> None:
+        sess = await self.get_quiz_session(user_id)
+        if not sess:
+            return
+        answers = sess["answers"]
+        answers.append({"q": qid, "chosen": chosen, "correct": correct})
+        await self.db.execute(
+            """
+            UPDATE quiz_sessions
+            SET current = current + 1,
+                score = score + ?,
+                answers = ?
+            WHERE user_id = ?
+            """,
+            (1 if correct else 0, json.dumps(answers), user_id),
+        )
+        await self.db.commit()
+
+    async def finish_quiz(self, user_id: int) -> Optional[dict[str, Any]]:
+        sess = await self.get_quiz_session(user_id)
+        if not sess:
+            return None
+        total = len(sess["question_ids"])
+        await self.db.execute(
+            """
+            INSERT INTO quiz_results (user_id, topic, score, total, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, sess["topic"], sess["score"], total, time.time()),
+        )
+        await self.db.execute("DELETE FROM quiz_sessions WHERE user_id = ?", (user_id,))
+        await self.db.commit()
+        return {"topic": sess["topic"], "score": sess["score"], "total": total,
+                "answers": sess["answers"]}
+
+    async def get_quiz_results(self, user_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT topic, score, total, created_at FROM quiz_results
+            WHERE user_id = ? ORDER BY id DESC LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------ #
+    # Statistika
+    # ------------------------------------------------------------------ #
+    async def bump(self, key: str, amount: int = 1) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO stats (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = value + ?
+            """,
+            (key, amount, amount),
+        )
+        await self.db.commit()
+
+    async def get_stat(self, key: str) -> int:
+        cur = await self.db.execute("SELECT value FROM stats WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        return int(row["value"]) if row else 0
+
+    async def get_all_stats(self) -> dict[str, int]:
+        cur = await self.db.execute("SELECT key, value FROM stats")
+        rows = await cur.fetchall()
+        return {r["key"]: int(r["value"]) for r in rows}
+
+    async def top_topics(self, limit: int = 5) -> list[tuple[str, int]]:
+        cur = await self.db.execute(
+            """
+            SELECT topic, COUNT(*) AS c FROM chat_history
+            WHERE topic IS NOT NULL AND topic != ''
+            GROUP BY topic ORDER BY c DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [(r["topic"], int(r["c"])) for r in rows]
+
+    async def count_messages(self) -> int:
+        cur = await self.db.execute("SELECT COUNT(*) AS c FROM chat_history")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v3: IELTS Speaking
+    # ================================================================== #
+    async def load_ielts_speaking(self, items: list[dict[str, Any]]) -> int:
+        count = 0
+        for it in items:
+            q = (it.get("question") or "").strip()
+            if not q:
+                continue
+            part = int(it.get("part", 1))
+            cur = await self.db.execute(
+                "SELECT id FROM ielts_speaking_questions WHERE part = ? AND question = ?",
+                (part, q),
+            )
+            if await cur.fetchone():
+                continue
+            await self.db.execute(
+                """
+                INSERT INTO ielts_speaking_questions
+                    (part, topic, question, cue_card, bullets, prep_seconds, speak_seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    part,
+                    it.get("topic", ""),
+                    q,
+                    it.get("cue_card", ""),
+                    json.dumps(it.get("bullets", []), ensure_ascii=False),
+                    int(it.get("prep_seconds", 0)),
+                    int(it.get("speak_seconds", 0)),
+                ),
+            )
+            count += 1
+        await self.db.commit()
+        log.info("IELTS Speaking savollari yuklandi: %d ta yangi", count)
+        return count
+
+    async def get_speaking_questions(self, part: int, limit: int = 1) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM ielts_speaking_questions WHERE part = ? ORDER BY RANDOM() LIMIT ?",
+            (part, limit),
+        )
+        rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["bullets"] = json.loads(d["bullets"] or "[]")
+            out.append(d)
+        return out
+
+    async def count_speaking(self, part: Optional[int] = None) -> int:
+        if part:
+            cur = await self.db.execute(
+                "SELECT COUNT(*) AS c FROM ielts_speaking_questions WHERE part = ?", (part,)
+            )
+        else:
+            cur = await self.db.execute("SELECT COUNT(*) AS c FROM ielts_speaking_questions")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v3: IELTS Writing
+    # ================================================================== #
+    async def load_ielts_writing(self, items: list[dict[str, Any]]) -> int:
+        count = 0
+        for it in items:
+            p = (it.get("prompt") or "").strip()
+            if not p:
+                continue
+            task = int(it.get("task", 1))
+            cur = await self.db.execute(
+                "SELECT id FROM ielts_writing_tasks WHERE task = ? AND prompt = ?", (task, p)
+            )
+            if await cur.fetchone():
+                continue
+            await self.db.execute(
+                """
+                INSERT INTO ielts_writing_tasks (task, prompt, kind, min_words)
+                VALUES (?, ?, ?, ?)
+                """,
+                (task, p, it.get("kind", ""), int(it.get("min_words", 150))),
+            )
+            count += 1
+        await self.db.commit()
+        log.info("IELTS Writing topshiriqlari yuklandi: %d ta yangi", count)
+        return count
+
+    async def get_writing_tasks(self, task: int, limit: int = 1) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM ielts_writing_tasks WHERE task = ? ORDER BY RANDOM() LIMIT ?",
+            (task, limit),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_writing_task(self, tid: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute("SELECT * FROM ielts_writing_tasks WHERE id = ?", (tid,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def count_writing(self, task: Optional[int] = None) -> int:
+        if task:
+            cur = await self.db.execute(
+                "SELECT COUNT(*) AS c FROM ielts_writing_tasks WHERE task = ?", (task,)
+            )
+        else:
+            cur = await self.db.execute("SELECT COUNT(*) AS c FROM ielts_writing_tasks")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v3: Testlar (kod tizimi) — matematika / fizika
+    # ================================================================== #
+    async def next_test_code(self, subject: str) -> str:
+        """Keyingi bo'sh test kodini yaratadi (MATH-0001 / PHY-0001)."""
+        prefix = "MATH" if subject == "math" else "PHY"
+        table = _TEST_TABLES.get(subject)
+        if not table:
+            raise ValueError(f"Noma'lum fan: {subject}")
+        cur = await self.db.execute(f"SELECT COUNT(*) AS c FROM {table}")
+        row = await cur.fetchone()
+        n = (int(row["c"]) if row else 0) + 1
+        while True:
+            code = f"{prefix}-{n:04d}"
+            cur = await self.db.execute("SELECT 1 FROM test_codes WHERE code = ?", (code,))
+            if not await cur.fetchone():
+                return code
+            n += 1
+
+    async def add_test(
+        self,
+        subject: str,
+        code: str,
+        title: str,
+        questions: list[dict[str, Any]],
+        answers: str,
+        created_by: Optional[int] = None,
+    ) -> int:
+        """Testni bazaga qo'shadi va kod reyestriga yozadi."""
+        table = _TEST_TABLES.get(subject)
+        if not table:
+            raise ValueError(f"Noma'lum fan: {subject}")
+        code = code.strip().upper()
+        cur = await self.db.execute(
+            f"""
+            INSERT INTO {table} (code, title, questions, answers, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                code,
+                title,
+                json.dumps(questions, ensure_ascii=False),
+                answers.strip().lower(),
+                created_by,
+                time.time(),
+            ),
+        )
+        test_id = cur.lastrowid
+        await self.db.execute(
+            """
+            INSERT OR REPLACE INTO test_codes (code, subject, test_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (code, subject, test_id, time.time()),
+        )
+        await self.db.commit()
+        log.info("Test qo'shildi: %s (%s)", code, subject)
+        return int(test_id)
+
+    async def get_test_by_code(self, code: str) -> Optional[dict[str, Any]]:
+        code = (code or "").strip().upper()
+        cur = await self.db.execute("SELECT * FROM test_codes WHERE code = ?", (code,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        subject, test_id = row["subject"], row["test_id"]
+        table = _TEST_TABLES.get(subject)
+        if not table:
+            return None
+        cur = await self.db.execute(f"SELECT * FROM {table} WHERE id = ?", (test_id,))
+        t = await cur.fetchone()
+        if not t:
+            return None
+        d = dict(t)
+        d["subject"] = subject
+        d["questions"] = json.loads(d["questions"])
+        return d
+
+    async def list_tests(self, subject: str) -> list[dict[str, Any]]:
+        table = _TEST_TABLES.get(subject)
+        if not table:
+            return []
+        cur = await self.db.execute(
+            f"SELECT id, code, title, created_at FROM {table} ORDER BY id"
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def count_tests(self, subject: str) -> int:
+        table = _TEST_TABLES.get(subject)
+        if not table:
+            return 0
+        cur = await self.db.execute(f"SELECT COUNT(*) AS c FROM {table}")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def record_submission(
+        self,
+        user_id: int,
+        code: str,
+        subject: str,
+        answers: str,
+        correct: int,
+        total: int,
+        detail: list[dict[str, Any]],
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO test_submissions
+                (user_id, code, subject, answers, correct, total, detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id, code, subject, answers, correct, total,
+                json.dumps(detail, ensure_ascii=False), time.time(),
+            ),
+        )
+        await self.db.commit()
+
+    async def get_submissions(self, user_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT code, subject, correct, total, created_at FROM test_submissions
+            WHERE user_id = ? ORDER BY id DESC LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ================================================================== #
+    # v3: Admin tasdiqlash oqimi
+    # ================================================================== #
+    async def create_pending_approval(
+        self, user_id: int, subject: str, payload: dict[str, Any]
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO pending_approvals (user_id, subject, payload, status, created_at)
+            VALUES (?, ?, ?, 'pending', ?)
+            """,
+            (user_id, subject, json.dumps(payload, ensure_ascii=False), time.time()),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def get_pending_approval(self, aid: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute("SELECT * FROM pending_approvals WHERE id = ?", (aid,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["payload"] = json.loads(d["payload"])
+        return d
+
+    async def set_approval_status(
+        self, aid: int, status: str, decided_by: Optional[int] = None
+    ) -> None:
+        await self.db.execute(
+            "UPDATE pending_approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            (status, decided_by, time.time(), aid),
+        )
+        await self.db.commit()
+
+    async def list_pending_approvals(self, status: str = "pending") -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM pending_approvals WHERE status = ? ORDER BY id", (status,)
+        )
+        rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
+
+    # ================================================================== #
+    # v3: Eslatmalar (reminders)
+    # ================================================================== #
+    async def add_reminder(self, user_id: int, text: str, remind_at: float) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO reminders (user_id, text, remind_at, sent, created_at)
+            VALUES (?, ?, ?, 0, ?)
+            """,
+            (user_id, text, remind_at, time.time()),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def get_due_reminders(self, now: Optional[float] = None) -> list[dict[str, Any]]:
+        now = now if now is not None else time.time()
+        cur = await self.db.execute(
+            "SELECT * FROM reminders WHERE sent = 0 AND remind_at <= ? ORDER BY remind_at",
+            (now,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def mark_reminder_sent(self, rid: int) -> None:
+        await self.db.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (rid,))
+        await self.db.commit()
+
+    async def list_reminders(self, user_id: int, only_pending: bool = True) -> list[dict[str, Any]]:
+        if only_pending:
+            cur = await self.db.execute(
+                "SELECT * FROM reminders WHERE user_id = ? AND sent = 0 ORDER BY remind_at",
+                (user_id,),
+            )
+        else:
+            cur = await self.db.execute(
+                "SELECT * FROM reminders WHERE user_id = ? ORDER BY remind_at DESC LIMIT 20",
+                (user_id,),
+            )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_reminder(self, rid: int, user_id: int) -> None:
+        await self.db.execute(
+            "DELETE FROM reminders WHERE id = ? AND user_id = ?", (rid, user_id)
+        )
+        await self.db.commit()
+
+    # ================================================================== #
+    # v3: Savollar banki
+    # ================================================================== #
+    async def add_question_bank(
+        self, user_id: Optional[int], subject: str, question: str, answer: str
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO question_bank (user_id, subject, question, answer, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, subject, question, answer, time.time()),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def search_question_bank(
+        self, query: Optional[str] = None, subject: Optional[str] = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM question_bank WHERE 1=1"
+        params: list[Any] = []
+        if subject:
+            sql += " AND subject = ?"
+            params.append(subject)
+        if query:
+            sql += " AND (question LIKE ? OR answer LIKE ?)"
+            params += [f"%{query}%", f"%{query}%"]
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cur = await self.db.execute(sql, params)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def count_question_bank(self) -> int:
+        cur = await self.db.execute("SELECT COUNT(*) AS c FROM question_bank")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v3: Ko'p qadamli suhbat holati
+    # ================================================================== #
+    async def set_user_state(
+        self, user_id: int, state: str, data: Optional[dict[str, Any]] = None
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO user_states (user_id, state, data, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                state = excluded.state,
+                data = excluded.data,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, state, json.dumps(data or {}, ensure_ascii=False), time.time()),
+        )
+        await self.db.commit()
+
+    async def get_user_state(self, user_id: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute("SELECT * FROM user_states WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["data"] = json.loads(d["data"] or "{}")
+        return d
+
+    async def clear_user_state(self, user_id: int) -> None:
+        await self.db.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+        await self.db.commit()
+
+    # ================================================================== #
+    # v3: Adminlar reyestri
+    # ================================================================== #
+    async def register_admin(self, user_id: int, username: Optional[str] = None) -> None:
+        """Adminni bazaga yozadi (username bo'yicha topilgan adminlar uchun)."""
+        await self.db.execute(
+            """
+            INSERT INTO admins (user_id, username, added_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET username = COALESCE(excluded.username, admins.username)
+            """,
+            (user_id, username, time.time()),
+        )
+        await self.db.commit()
+
+    async def get_registered_admins(self) -> list[int]:
+        cur = await self.db.execute("SELECT user_id FROM admins")
+        rows = await cur.fetchall()
+        return [int(r["user_id"]) for r in rows]
+
+    # ================================================================== #
+    # v4: Savol qo'shish (IELTS Speaking / Writing)
+    # ================================================================== #
+    async def add_speaking_question(
+        self, part: int, question: str, topic: str = "", cue_card: str = "",
+        bullets: Optional[list[str]] = None, prep_seconds: int = 0, speak_seconds: int = 0,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO ielts_speaking_questions
+                (part, topic, question, cue_card, bullets, prep_seconds, speak_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (part, topic, question, cue_card,
+             json.dumps(bullets or [], ensure_ascii=False), prep_seconds, speak_seconds),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def add_writing_task(
+        self, task: int, prompt: str, kind: str = "", min_words: int = 0
+    ) -> int:
+        if not min_words:
+            min_words = 150 if task == 1 else 250
+        cur = await self.db.execute(
+            """
+            INSERT INTO ielts_writing_tasks (task, prompt, kind, min_words)
+            VALUES (?, ?, ?, ?)
+            """,
+            (task, prompt, kind, min_words),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    # ================================================================== #
+    # v4: Kanallar
+    # ================================================================== #
+    async def add_channel(
+        self, owner_id: int, channel_id: int, title: str = "", username: str = ""
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO channels (owner_id, channel_id, title, username, connected_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                title    = excluded.title,
+                username = excluded.username
+            """,
+            (owner_id, channel_id, title, username, time.time()),
+        )
+        await self.db.commit()
+
+    async def get_channel(self, channel_id: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM channels WHERE channel_id = ?", (channel_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_channels(self, owner_id: Optional[int] = None) -> list[dict[str, Any]]:
+        if owner_id is None:
+            cur = await self.db.execute("SELECT * FROM channels ORDER BY id DESC")
+        else:
+            cur = await self.db.execute(
+                "SELECT * FROM channels WHERE owner_id = ? ORDER BY id DESC", (owner_id,)
+            )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_channel(self, channel_id: int, owner_id: Optional[int] = None) -> None:
+        if owner_id is None:
+            await self.db.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+        else:
+            await self.db.execute(
+                "DELETE FROM channels WHERE channel_id = ? AND owner_id = ?",
+                (channel_id, owner_id),
+            )
+        await self.db.commit()
+
+    async def count_channels(self) -> int:
+        cur = await self.db.execute("SELECT COUNT(*) AS c FROM channels")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v4: Rejalashtirilgan postlar
+    # ================================================================== #
+    async def add_scheduled_post(
+        self, channel_id: int, text: str, run_at: float, media_type: str = "",
+        media_file_id: str = "", repeat_minutes: int = 0, created_by: Optional[int] = None,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO scheduled_posts
+                (channel_id, text, media_type, media_file_id, run_at,
+                 repeat_minutes, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (channel_id, text, media_type, media_file_id, run_at,
+             repeat_minutes, created_by, time.time()),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def get_due_scheduled_posts(self, now: Optional[float] = None) -> list[dict[str, Any]]:
+        now = now or time.time()
+        cur = await self.db.execute(
+            "SELECT * FROM scheduled_posts WHERE sent = 0 AND run_at <= ? ORDER BY run_at",
+            (now,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def mark_post_sent(self, pid: int) -> None:
+        await self.db.execute("UPDATE scheduled_posts SET sent = 1 WHERE id = ?", (pid,))
+        await self.db.commit()
+
+    async def reschedule_post(self, pid: int, next_run_at: float) -> None:
+        await self.db.execute(
+            "UPDATE scheduled_posts SET run_at = ?, sent = 0 WHERE id = ?",
+            (next_run_at, pid),
+        )
+        await self.db.commit()
+
+    async def list_scheduled_posts(
+        self, channel_id: Optional[int] = None, only_pending: bool = True
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM scheduled_posts WHERE 1=1"
+        params: list[Any] = []
+        if channel_id is not None:
+            sql += " AND channel_id = ?"
+            params.append(channel_id)
+        if only_pending:
+            sql += " AND sent = 0"
+        sql += " ORDER BY run_at"
+        cur = await self.db.execute(sql, params)
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_scheduled_post(self, pid: int) -> None:
+        await self.db.execute("DELETE FROM scheduled_posts WHERE id = ?", (pid,))
+        await self.db.commit()

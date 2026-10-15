@@ -1,42 +1,145 @@
-# Render Blueprint - AI Manager Bot (@AIManagerProBot)
-# Render Dashboard -> New + -> Blueprint -> connect this repo.
+# ===========================================================================
+#  Render Blueprint — AI Manager Bot (@AIManagerProBot)
+#
+#  ISHLATISH: Render Dashboard -> "New +" -> "Blueprint" -> reponi tanlang.
+#  Render bu faylni o'qib servisni yaratadi, keyin `sync: false` bo'lgan
+#  maxfiy qiymatlarni so'raydi. Qiymatlarni kiritib "Apply" bosing.
+#
+#  ⚠️ 2026 holatiga ko'ra Render rasmiy hujjatlaridan:
+#     • BEPUL tarifda BACKGROUND WORKER YO'Q — eng arzoni $7/oy.
+#     • BEPUL tarifda PERSISTENT DISK YO'Q (faqat pullik, $0.25/GB/oy).
+#     • Bepul Web Service 15 daqiqa harakatsizlikdan keyin "uxlaydi".
+#  Shuning uchun DEFAULT (bepul) variant: Web Service + health server +
+#  self-ping + tashqi keep-alive (UptimeRobot) + GitHub Gist zaxirasi.
+#  Pastda pullik Background Worker varianti ham (izohda) berilgan.
+# ===========================================================================
+
 services:
+  # -------------------------------------------------------------------------
+  # 1) ASOSIY — BEPUL yo'l: Web Service + health-check + keep-alive
+  # -------------------------------------------------------------------------
   - type: web
     name: project
     runtime: docker
     plan: free
     region: oregon
+    branch: main
+    autoDeploy: true
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
-    autoDeploy: true
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      # --- Render avtomatik beradi (hujjat uchun) ---
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENABLE_HEALTH_SERVER
+        value: "true"
+      - key: HEALTH_HOST
+        value: 0.0.0.0
+
+      # --- Majburiy maxfiy qiymatlar: Render Dashboard'da so'raladi ---
+      - key: BOT_TOKEN
         sync: false
-      - key: GEMINI_API_KEYS
+      - key: GEMINI_KEY_1
         sync: false
+      - key: GEMINI_KEY_2
+        sync: false
+      - key: GEMINI_KEY_3
+        sync: false
+      - key: GEMINI_KEY_4
+        sync: false
+      - key: GEMINI_KEY_5
+        sync: false
+
+      # --- Admin ---
+      - key: ADMIN_USERNAME
+        value: Husan_Dilmurodov
+      - key: ADMIN_PHONE
+        value: "+998 883800311"
+
+      # --- Model zaxira zanjiri (fallback) ---
       - key: GEMINI_MODELS
-        value: gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest,gemini-3.8-flash,gemini-flash-latest
-      - key: WEBHOOK_SECRET
-        generateValue: true
-      - key: SELF_PING_ENABLED
+        value: gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.8-flash,gemini-3.5-flash
+
+      # --- Baza: bepul tarifda disk vaqtinchalik -> Gist zaxirasi ---
+      - key: DB_PATH
+        value: bot.db
+      - key: BACKUP_ENABLED
         value: "true"
-      - key: SELF_PING_INTERVAL
-        value: "600"
-      - key: HISTORY_TURNS
-        value: "8"
-      - key: WATCHDOG_ENABLED
+      - key: RESTORE_ON_START
         value: "true"
-      - key: WATCHDOG_MEMORY_LIMIT_MB
-        value: "400"
+      - key: BACKUP_INTERVAL_SECONDS
+        value: "3600"
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GIST_ID
+        sync: false
+
+      # --- Umumiy ---
+      - key: LOG_LEVEL
+        value: INFO
       - key: ENABLE_INSTANT_REPLIES
+        value: "true"
+      - key: ENABLE_VOICE
         value: "true"
       - key: ENABLE_IMAGE_GEN
         value: "true"
-      - key: LOG_LEVEL
-        value: INFO
-      # WEBHOOK_BASE_URL is bound to Render's own public URL automatically.
-      - key: WEBHOOK_BASE_URL
-        fromService:
-          name: project
-          type: web
-          envVarKey: RENDER_EXTERNAL_URL
+
+      # --- Self-ping: bepul Web Service uxlab qolmasligi uchun ---
+      # RENDER_EXTERNAL_URL Render tomonidan avtomatik beriladi — kod uni
+      # o'zi topadi, shuning uchun SELF_PING_URL yozish shart emas.
+      - key: SELF_PING_INTERVAL
+        value: "600"
+
+      # --- Watchdog: uzoq muddatli barqarorlik (xotira oqishi himoyasi) ---
+      - key: WATCHDOG_ENABLED
+        value: "true"
+      - key: WATCHDOG_INTERVAL
+        value: "300"
+      # Render bepul tarifida ~512 MB RAM — 400 MB da toza restart qilamiz.
+      - key: WATCHDOG_MEMORY_LIMIT_MB
+        value: "400"
+
+  # -------------------------------------------------------------------------
+  # 2) MUQOBIL — PULLIK yo'l ($7/oy): Background Worker + persistent disk
+  #    HECH QACHON uxlamaydi va disk doimiy bo'ladi — eng barqaror "24/7".
+  #    Ishlatish uchun quyidagi blokni izohdan chiqaring va yuqoridagi web
+  #    servis blokini izohga oling (yoki o'chiring).
+  #
+  #    ⚠️ Worker'da PORT berilmaydi -> health server avtomatik o'chadi.
+  #       Worker uchun health check ham, keep-alive ham KERAK EMAS.
+  # -------------------------------------------------------------------------
+  # - type: worker
+  #   name: project-worker
+  #   runtime: docker
+  #   plan: starter            # $7/oy — free mavjud emas
+  #   region: oregon
+  #   branch: main
+  #   autoDeploy: true
+  #   dockerfilePath: ./Dockerfile
+  #   disk:
+  #     name: bot-data
+  #     mountPath: /var/data
+  #     sizeGB: 1               # $0.25/oy
+  #   envVars:
+  #     - key: DB_PATH
+  #       value: /var/data/bot.db
+  #     - key: BACKUP_ENABLED
+  #       value: "false"        # disk doimiy -> Gist shart emas
+  #     - key: BOT_TOKEN
+  #       sync: false
+  #     - key: GEMINI_KEY_1
+  #       sync: false
+  #     - key: GEMINI_KEY_2
+  #       sync: false
+  #     - key: GEMINI_KEY_3
+  #       sync: false
+  #     - key: GEMINI_KEY_4
+  #       sync: false
+  #     - key: GEMINI_KEY_5
+  #       sync: false
+
+# ===========================================================================
+#  IZOH: `sync: false` — Render Dashboard'da qiymat so'raladi va GitHub'da
+#  saqlanmaydi. Bu maxfiy ma'lumot uchun TO'G'RI usul. Hech qachon haqiqiy
+#  tokenni render.yaml yoki .env.example ichiga yozmang.
+# ===========================================================================

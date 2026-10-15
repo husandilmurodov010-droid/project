@@ -1,155 +1,155 @@
-"""AI Manager Bot - configuration.
-
-Every value is read from the environment (.env locally, Render env in prod).
-No secret is ever written into this file.
-"""
+"""Konfiguratsiya: .env faylidan o'qiladi."""
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# --- Telegram ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-def _env(key, default=""):
-    v = os.getenv(key)
-    return v if v not in (None, "") else default
+# --- Gemini ---
+# Kalitlarni .env da GEMINI_API_KEYS=key1,key2,key3,... ko'rinishida bering.
+# Ikki xil usul qo'llanadi (ikkisi ham ishlaydi, birlashtiriladi):
+#   1) GEMINI_API_KEYS=key1,key2,key3,key4,key5   (vergul bilan)
+#   2) GEMINI_KEY_1=... GEMINI_KEY_2=... ... GEMINI_KEY_5=...
+#      (Render'da har birini alohida env sifatida kiritish uchun qulay)
+_raw_keys = os.getenv("GEMINI_API_KEYS", "")
+_numbered_keys = [os.getenv(f"GEMINI_KEY_{i}", "") for i in range(1, 11)]
+_keys = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+_keys += [k.strip() for k in _numbered_keys if k.strip()]
+# Takrorlanmasin, kiritilgan tartib saqlansin
+GEMINI_API_KEYS = list(dict.fromkeys(_keys))
 
-
-def _bool(key, default=False):
-    return str(os.getenv(key, str(default))).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _int(key, default):
-    try:
-        return int(str(os.getenv(key, default)).strip())
-    except (TypeError, ValueError):
-        return default
-
-
-# ---------------------------------------------------------------- Telegram
-BOT_TOKEN = _env("BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN")
-
-
-# ---------------------------------------------------------------- Gemini keys
-def _collect_keys():
-    """Accept GEMINI_API_KEYS (comma separated) and/or GEMINI_KEY_1..5."""
-    raw = []
-    csv = _env("GEMINI_API_KEYS")
-    if csv:
-        raw += [k.strip() for k in csv.split(",")]
-    for i in range(1, 6):
-        raw.append(_env(f"GEMINI_KEY_{i}"))
-    out, seen = [], set()
-    for k in raw:
-        if k and k not in seen:
-            seen.add(k)
-            out.append(k)
-    return out
-
-
-GEMINI_API_KEYS = _collect_keys()
-GEMINI_MODELS = [m.strip() for m in _env(
+# Model zaxira zanjiri (fallback): birinchi model kvota/xato bersa, keyingisi sinaladi.
+# MUHIM: "gemini-1.5-flash" Google tomonidan olib tashlangan (404) — ishlatilmaydi.
+_raw_models = os.getenv(
     "GEMINI_MODELS",
-    "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-lite-latest,"
-    "gemini-3.8-flash,gemini-flash-latest",
-).split(",") if m.strip()]
-GEMINI_IMAGE_MODELS = [m.strip() for m in _env(
-    "GEMINI_IMAGE_MODELS",
-    "gemini-3.1-flash-image,gemini-3-pro-image",
-).split(",") if m.strip()]
-COOLDOWN_SECONDS = _int("COOLDOWN_SECONDS", 60)
-REQUEST_TIMEOUT = _int("REQUEST_TIMEOUT", 60)
+    "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.8-flash,gemini-3.5-flash",
+)
+GEMINI_MODELS = [m.strip() for m in _raw_models.split(",") if m.strip()]
+
+# Orqaga moslik uchun: bitta model nomi.
+GEMINI_MODEL = GEMINI_MODELS[0] if GEMINI_MODELS else "gemini-3.5-flash-lite"
+
+GEMINI_BASE_URL = os.getenv(
+    "GEMINI_BASE_URL",
+    "https://generativelanguage.googleapis.com/v1beta",
+).rstrip("/")
+
+# Imagen (ixtiyoriy — rasm generatsiyasi uchun)
+IMAGEN_MODEL = os.getenv("IMAGEN_MODEL", "imagen-3.0-generate-002").strip()
+ENABLE_IMAGE_GEN = os.getenv("ENABLE_IMAGE_GEN", "true").lower() in ("1", "true", "yes")
+
+# --- Ma'lumotlar bazasi ---
+DB_PATH = os.getenv("DB_PATH", "bot.db").strip()
+INSTANT_REPLIES_FILE = os.getenv("INSTANT_REPLIES_FILE", "instant_replies.json").strip()
+QUIZ_DATA_FILE = os.getenv("QUIZ_DATA_FILE", "quiz_data.json").strip()
+IELTS_SPEAKING_FILE = os.getenv("IELTS_SPEAKING_FILE", "ielts_speaking.json").strip()
+IELTS_WRITING_FILE = os.getenv("IELTS_WRITING_FILE", "ielts_writing.json").strip()
+MATH_TESTS_FILE = os.getenv("MATH_TESTS_FILE", "math_tests.json").strip()
+PHYSICS_TESTS_FILE = os.getenv("PHYSICS_TESTS_FILE", "physics_tests.json").strip()
+
+# Tezkor javob tizimi
+ENABLE_INSTANT_REPLIES = os.getenv("ENABLE_INSTANT_REPLIES", "true").lower() in ("1", "true", "yes")
+# Tezkor javob faqat shu uzunlikdan qisqa xabarlarga qo'llanadi (belgi soni).
+INSTANT_MAX_LEN = int(os.getenv("INSTANT_MAX_LEN", "60"))
+
+# --- Test (quiz) ---
+QUIZ_QUESTIONS_PER_SESSION = int(os.getenv("QUIZ_QUESTIONS_PER_SESSION", "5"))
+
+# --- Suhbat tarixi ---
+HISTORY_CONTEXT_SIZE = int(os.getenv("HISTORY_CONTEXT_SIZE", "6"))
+
+# --- Umumiy ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_DIR = os.getenv("LOG_DIR", "logs")
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "90"))
+MAX_RETRIES_PER_KEY = int(os.getenv("MAX_RETRIES_PER_KEY", "2"))
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "60"))
+
+# --- Admin ---
+# ADMIN_IDS — Telegram user_id lar (vergul bilan). ADMIN_USERNAMES — @ belgisisiz.
+# ADMIN_IDS — vergul bilan bir nechta id; ADMIN_ID — bitta id (Render uchun qulay)
+# ADMIN_USERNAMES — vergul bilan; ADMIN_USERNAME — bitta username
+_admin = os.getenv("ADMIN_IDS", "")
+_admin_single = os.getenv("ADMIN_ID", "")
+_admin_all = ",".join(x for x in (_admin, _admin_single) if x)
+ADMIN_IDS = [int(x) for x in _admin_all.split(",") if x.strip().lstrip("-").isdigit()]
+ADMIN_IDS = list(dict.fromkeys(ADMIN_IDS))
+
+_admin_unames = os.getenv("ADMIN_USERNAMES", "")
+_admin_uname_single = os.getenv("ADMIN_USERNAME", "Husan_Dilmurodov")
+_unames_all = ",".join(x for x in (_admin_unames, _admin_uname_single) if x)
+ADMIN_USERNAMES = list(
+    dict.fromkeys(u.strip().lstrip("@").lower() for u in _unames_all.split(",") if u.strip())
+)
+ADMIN_PHONE = os.getenv("ADMIN_PHONE", "+998 883800311").strip()
+
+# --- Eslatmalar (reminders) ---
+# Fon vazifasi har necha sekundda tekshiradi.
+REMINDER_CHECK_INTERVAL = int(os.getenv("REMINDER_CHECK_INTERVAL", "30"))
+
+# --- Kanal boshqaruvi ---
+# Standart kanal ID (ixtiyoriy). Bo'sh bo'lsa, kanal bot orqali ulanadi.
+DEFAULT_CHANNEL_ID = os.getenv("DEFAULT_CHANNEL_ID", "").strip()
+# Rejalashtirilgan postlarni tekshirish oralig'i (sekund).
+POST_CHECK_INTERVAL = int(os.getenv("POST_CHECK_INTERVAL", "30"))
+
+# --- Ovozli rejim ---
+# Ovozli xabarlarni matnga o'girish uchun model (Gemini audio input).
+VOICE_MODEL = os.getenv("VOICE_MODEL", "gemini-3.5-flash-lite").strip()
+ENABLE_VOICE = os.getenv("ENABLE_VOICE", "true").lower() in ("1", "true", "yes")
 
 
-# ---------------------------------------------------------------- Database
-DB_PATH = _env("DB_PATH", "bot.db")
+# --- Render / bulut deploy ---
+# Render `PORT` ni avtomatik beradi; 0 bo'lsa health server o'chadi.
+PORT = int(os.getenv("PORT", "0"))
+ENABLE_HEALTH_SERVER = os.getenv("ENABLE_HEALTH_SERVER", "true").lower() in ("1", "true", "yes")
+HEALTH_HOST = os.getenv("HEALTH_HOST", "0.0.0.0").strip()
+
+# Self-ping: Render uxlab qolmasligi uchun servis o'zini ping qiladi.
+# Render'da RENDER_EXTERNAL_URL avtomatik mavjud bo'ladi.
+SELF_PING_URL = (
+    os.getenv("SELF_PING_URL", "").strip()
+    or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+)
+SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "600"))
+
+# --- Watchdog (uzoq muddatli barqarorlik) ---
+# Xotira oqib ketishini (memory leak) va event loop bloklanishini kuzatadi.
+WATCHDOG_ENABLED = os.getenv("WATCHDOG_ENABLED", "true").lower() in ("1", "true", "yes")
+WATCHDOG_INTERVAL = int(os.getenv("WATCHDOG_INTERVAL", "300"))
+# Xotira chegarasi (MB). 0 = o'chirilgan. Oshsa — jarayon toza qayta ishga tushadi.
+# Render bepul tarifida ~512 MB RAM; 400 MB xavfsiz chegara.
+WATCHDOG_MEMORY_LIMIT_MB = int(os.getenv("WATCHDOG_MEMORY_LIMIT_MB", "0"))
+WATCHDOG_GC_EVERY = int(os.getenv("WATCHDOG_GC_EVERY", "6"))
+
+# --- Zaxiralash (GitHub Gist) ---
+# Render bepul tarifida disk vaqtinchalik — baza shu yo'l bilan saqlanadi.
+BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "false").lower() in ("1", "true", "yes")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GIST_ID = os.getenv("GIST_ID", "").strip()
+BACKUP_INTERVAL_SECONDS = int(os.getenv("BACKUP_INTERVAL_SECONDS", "3600"))
+RESTORE_ON_START = os.getenv("RESTORE_ON_START", "true").lower() in ("1", "true", "yes")
 
 
-# ---------------------------------------------------------------- Health server
-PORT = _int("PORT", 0)
-ENABLE_HEALTH_SERVER = _bool("ENABLE_HEALTH_SERVER", True)
-SELF_PING_ENABLED = _bool("SELF_PING_ENABLED", True)
-SELF_PING_INTERVAL = _int("SELF_PING_INTERVAL", 600)
-RENDER_EXTERNAL_URL = _env("RENDER_EXTERNAL_URL")
+def is_admin(user_id: int, username: str | None = None) -> bool:
+    """Foydalanuvchi admin ekanligini tekshiradi (ID yoki username bo'yicha)."""
+    if user_id in ADMIN_IDS:
+        return True
+    if username and username.lstrip("@").lower() in ADMIN_USERNAMES:
+        return True
+    return False
 
 
-# ---------------------------------------------------------------- Watchdog
-WATCHDOG_ENABLED = _bool("WATCHDOG_ENABLED", True)
-WATCHDOG_INTERVAL = _int("WATCHDOG_INTERVAL", 300)
-WATCHDOG_MEMORY_LIMIT_MB = _int("WATCHDOG_MEMORY_LIMIT_MB", 400)
-WATCHDOG_GC_EVERY = _int("WATCHDOG_GC_EVERY", 6)
-
-
-# ---------------------------------------------------------------- Backup (GitHub Gist)
-BACKUP_ENABLED = _bool("BACKUP_ENABLED", False)
-GITHUB_TOKEN = _env("GITHUB_TOKEN")
-GIST_ID = _env("GIST_ID")
-BACKUP_INTERVAL_SECONDS = _int("BACKUP_INTERVAL_SECONDS", 3600)
-RESTORE_ON_START = _bool("RESTORE_ON_START", True)
-
-
-# ---------------------------------------------------------------- Admin
-ADMIN_ID = _env("ADMIN_ID") or _env("ADMIN_IDS")
-ADMIN_USERNAME = _env("ADMIN_USERNAME", "Husan_Dilmurodov").lstrip("@")
-ADMIN_PHONE = _env("ADMIN_PHONE", "")
-
-
-def admin_ids():
-    out = []
-    for part in ADMIN_ID.replace(";", ",").split(","):
-        p = part.strip()
-        if p.isdigit():
-            out.append(int(p))
-    return out
-
-
-# ---------------------------------------------------------------- Features
-ENABLE_INSTANT_REPLIES = _bool("ENABLE_INSTANT_REPLIES", True)
-INSTANT_MAX_LEN = _int("INSTANT_MAX_LEN", 60)
-QUIZ_QUESTIONS_PER_SESSION = _int("QUIZ_QUESTIONS_PER_SESSION", 5)
-ENABLE_IMAGE_GEN = _bool("ENABLE_IMAGE_GEN", True)
-HISTORY_TURNS = _int("HISTORY_TURNS", 8)
-LOG_LEVEL = _env("LOG_LEVEL", "INFO")
-WEBHOOK_BASE_URL = _env("WEBHOOK_BASE_URL")
-DEFAULT_LANG = _env("DEFAULT_LANG", "uz")
-
-TEXTS = {
-    "uz": {
-        "welcome": "Assalomu alaykum, {name}! \U0001f916\n\nMen <b>AI Manager Bot</b> \u2014 har qanday sohada yordam beradigan aqlli yordamchingizman.",
-        "choose_lang": "Tilni tanlang:",
-        "main_menu": "\U0001f4cb Asosiy menyu",
-        "ask_ai": "\u2753 Savolingizni yozing \u2014 men javob beraman.",
-        "thinking": "\U0001f914 O'ylayapman...",
-        "cleared": "\U0001f9f9 Suhbat tarixi tozalandi.",
-        "no_history": "\U0001f4ed Tarix bo'sh.",
-        "error": "\u26a0\ufe0f Xatolik yuz berdi. Keyinroq urinib ko'ring.",
-        "busy": "\u23f3 Barcha kalitlar band. Iltimos, biroz kutib qayta urinib ko'ring.",
-    },
-    "en": {
-        "welcome": "Hello, {name}! \U0001f916\n\nI am <b>AI Manager Bot</b> \u2014 your all-purpose AI assistant.",
-        "choose_lang": "Choose a language:",
-        "main_menu": "\U0001f4cb Main menu",
-        "ask_ai": "\u2753 Send me a question and I will answer.",
-        "thinking": "\U0001f914 Thinking...",
-        "cleared": "\U0001f9f9 Chat history cleared.",
-        "no_history": "\U0001f4ed No history yet.",
-        "error": "\u26a0\ufe0f Something went wrong. Please try again.",
-        "busy": "\u23f3 All keys are busy. Please retry shortly.",
-    },
-    "ru": {
-        "welcome": "\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435, {name}! \U0001f916\n\n\u042f <b>AI Manager Bot</b> \u2014 \u0432\u0430\u0448 \u0443\u043d\u0438\u0432\u0435\u0440\u0441\u0430\u043b\u044c\u043d\u044b\u0439 AI-\u043f\u043e\u043c\u043e\u0449\u043d\u0438\u043a.",
-        "choose_lang": "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u044f\u0437\u044b\u043a:",
-        "main_menu": "\U0001f4cb \u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e",
-        "ask_ai": "\u2753 \u0417\u0430\u0434\u0430\u0439\u0442\u0435 \u0432\u043e\u043f\u0440\u043e\u0441 \u2014 \u044f \u043e\u0442\u0432\u0435\u0447\u0443.",
-        "thinking": "\U0001f914 \u0414\u0443\u043c\u0430\u044e...",
-        "cleared": "\U0001f9f9 \u0418\u0441\u0442\u043e\u0440\u0438\u044f \u043e\u0447\u0438\u0449\u0435\u043d\u0430.",
-        "no_history": "\U0001f4ed \u0418\u0441\u0442\u043e\u0440\u0438\u044f \u043f\u0443\u0441\u0442\u0430.",
-        "error": "\u26a0\ufe0f \u041f\u0440\u043e\u0438\u0437\u043e\u0448\u043b\u0430 \u043e\u0448\u0438\u0431\u043a\u0430. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
-        "busy": "\u23f3 \u0412\u0441\u0435 \u043a\u043b\u044e\u0447\u0438 \u0437\u0430\u043d\u044f\u0442\u044b. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
-    },
-}
-
-
-def t(lang, key, **kw):
-    lang = lang if lang in TEXTS else DEFAULT_LANG
-    s = TEXTS[lang].get(key) or TEXTS[DEFAULT_LANG].get(key, key)
-    return s.format(**kw) if kw else s
+def validate() -> None:
+    """Ishga tushishdan oldin majburiy sozlamalarni tekshiradi."""
+    errors = []
+    if not BOT_TOKEN:
+        errors.append("BOT_TOKEN bo'sh — .env faylini to'ldiring.")
+    if not GEMINI_API_KEYS:
+        errors.append("GEMINI_API_KEYS bo'sh — kamida bitta kalit kerak.")
+    if not GEMINI_MODELS:
+        errors.append("GEMINI_MODELS bo'sh — kamida bitta model kerak.")
+    if errors:
+        raise SystemExit("\n".join(errors))

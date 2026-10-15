@@ -1,0 +1,43 @@
+# ===========================================================================
+#  Docker build kontekstidan chiqarib tashlanadigan fayllar.
+#  Maqsad: image kichik va xavfsiz bo'lsin — maxfiy ma'lumot va kesh
+#  image ichiga tushmasin.
+# ===========================================================================
+
+# Maxfiy sozlamalar — image ICHIGA HECH QACHON kirmasin
+.env
+.env.*
+!.env.example
+
+# Ma'lumotlar bazasi va loglar (volume orqali ulanadi)
+*.db
+*.db-wal
+*.db-shm
+data/
+logs/
+
+# Git, CI, kesh
+.git/
+.github/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tahrirlovchi / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Render / hujjatlar (image'ga kerak emas)
+render.yaml
+*.md
+test_deploy.py
+test_bot.py
+handler_test.py

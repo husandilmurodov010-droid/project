@@ -1,8 +1,20 @@
-[
-  {"task": 1, "type": "Academic", "minutes": 20, "min_words": 150, "prompt": "The chart below shows the percentage of household income spent on food in five countries in 2025. Summarise the information by selecting and reporting the main features, and make comparisons where relevant."},
-  {"task": 1, "type": "Academic", "minutes": 20, "min_words": 150, "prompt": "The diagram illustrates the process of recycling plastic bottles. Summarise the information by selecting and reporting the main features."},
-  {"task": 1, "type": "General", "minutes": 20, "min_words": 150, "prompt": "You recently stayed at a hotel and were unhappy with the service. Write a letter to the manager. Explain why you stayed there, what went wrong, and what you would like them to do."},
-  {"task": 2, "type": "Academic", "minutes": 40, "min_words": 250, "prompt": "Some people believe that university education should be free for everyone, while others think students should pay for it. Discuss both views and give your own opinion."},
-  {"task": 2, "type": "Academic", "minutes": 40, "min_words": 250, "prompt": "In many countries, the number of people choosing to work from home has increased. Do the advantages of this trend outweigh the disadvantages?"},
-  {"task": 2, "type": "Academic", "minutes": 40, "min_words": 250, "prompt": "Artificial intelligence is increasingly used in the workplace. Is this a positive or negative development for society?"}
-]
+{
+  "_comment": "IELTS Writing topshiriqlari. task: 1 (grafik/xat, kamida 150 so'z), 2 (insho, kamida 250 so'z).",
+  "tasks": [
+    { "task": 1, "kind": "graph", "min_words": 150, "prompt": "The chart below shows the percentage of households in a country with internet access between 2000 and 2020. Summarise the information by selecting and reporting the main features, and make comparisons where relevant." },
+    { "task": 1, "kind": "graph", "min_words": 150, "prompt": "The graph below shows the number of international students enrolled in universities in three countries from 2010 to 2020. Summarise the information by selecting and reporting the main features, and make comparisons where relevant." },
+    { "task": 1, "kind": "process", "min_words": 150, "prompt": "The diagram below shows the process of recycling plastic bottles. Summarise the information by selecting and reporting the main features." },
+    { "task": 1, "kind": "table", "min_words": 150, "prompt": "The table below shows the average monthly spending on food, housing and transport in four cities. Summarise the information by selecting and reporting the main features, and make comparisons where relevant." },
+    { "task": 1, "kind": "letter", "min_words": 150, "prompt": "You recently stayed at a hotel and were unhappy with the service. Write a letter to the hotel manager. In your letter: explain when you stayed, describe the problems you experienced, and say what you would like the manager to do." },
+    { "task": 1, "kind": "letter", "min_words": 150, "prompt": "You are going to move to a new city for work. Write a letter to a friend. In your letter: tell them about the move, explain why you are moving, and invite them to visit you." },
+
+    { "task": 2, "kind": "opinion", "min_words": 250, "prompt": "Some people believe that university education should be free for all students, while others think students should pay for it themselves. Discuss both views and give your own opinion." },
+    { "task": 2, "kind": "discussion", "min_words": 250, "prompt": "Some people think that technology has made our lives more complicated, while others believe it has made life easier. Discuss both views and give your own opinion." },
+    { "task": 2, "kind": "problem_solution", "min_words": 250, "prompt": "In many cities, traffic congestion is becoming a serious problem. What are the causes of this problem, and what measures could be taken to solve it?" },
+    { "task": 2, "kind": "advantage_disadvantage", "min_words": 250, "prompt": "More and more people are working from home instead of in an office. Do the advantages of this trend outweigh the disadvantages?" },
+    { "task": 2, "kind": "opinion", "min_words": 250, "prompt": "Some people believe that children should start learning a foreign language at primary school rather than secondary school. Do you agree or disagree?" },
+    { "task": 2, "kind": "discussion", "min_words": 250, "prompt": "Some people think that the government should spend money on public services rather than on the arts. To what extent do you agree or disagree?" },
+    { "task": 2, "kind": "problem_solution", "min_words": 250, "prompt": "Many young people today are leaving their home country to study or work abroad. What are the reasons for this, and what problems can it cause?" },
+    { "task": 2, "kind": "opinion", "min_words": 250, "prompt": "Some people believe that social media has a negative effect on personal relationships. To what extent do you agree or disagree?" }
+  ]
+}

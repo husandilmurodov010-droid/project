@@ -1,17 +1,41 @@
-[
-  {"code": "MTH101", "title": "Kvadrat tenglamalar", "questions": [
-    {"question": "x² − 5x + 6 = 0 tenglamaning ildizlari?", "options": ["1 va 6", "2 va 3", "-2 va -3", "3 va 4"], "answer": 1},
-    {"question": "Diskriminant D = b² − 4ac formula bilan topiladi. x² − 4x + 4 = 0 da D nechaga teng?", "options": ["0", "4", "8", "16"], "answer": 0},
-    {"question": "x² + 2x − 8 = 0 ning kichik ildizi?", "options": ["-4", "-2", "2", "4"], "answer": 0}
-  ]},
-  {"code": "MTH102", "title": "Foiz va nisbat", "questions": [
-    {"question": "500 ning 20% i nechaga teng?", "options": ["50", "75", "100", "125"], "answer": 2},
-    {"question": "Narx 80 000 dan 100 000 ga oshdi. O'sish foizi?", "options": ["20%", "25%", "30%", "15%"], "answer": 1},
-    {"question": "3:4 nisbatda 56 ni bo'lsang, katta qismi?", "options": ["24", "28", "32", "36"], "answer": 2}
-  ]},
-  {"code": "MTH103", "title": "Progressiya", "questions": [
-    {"question": "Arifmetik progressiya: 3, 7, 11, ... 10-hadi?", "options": ["37", "39", "41", "43"], "answer": 1},
-    {"question": "Geometrik progressiya: 2, 6, 18, ... 5-hadi?", "options": ["54", "108", "162", "216"], "answer": 2},
-    {"question": "1+2+3+...+100 yig'indisi?", "options": ["4950", "5050", "5150", "5000"], "answer": 1}
-  ]}
-]
+{
+  "_comment": "Matematika testlari. 'answers' — variant harflari ketma-ket (masalan 'abcbb'). Foydalanuvchi ham xuddi shu formatda javob yuboradi.",
+  "tests": [
+    {
+      "code": "MATH-0001",
+      "title": "Matematika — asosiy arifmetika",
+      "answers": "bbcbb",
+      "questions": [
+        { "q": "12 × 8 nechaga teng?", "options": ["86", "96", "104", "92"] },
+        { "q": "√144 nechaga teng?", "options": ["11", "12", "13", "14"] },
+        { "q": "5! (besh faktorial) nechaga teng?", "options": ["25", "60", "120", "720"] },
+        { "q": "Uchburchak ichki burchaklari yig'indisi necha gradus?", "options": ["90°", "180°", "270°", "360°"] },
+        { "q": "0,5 soni oddiy kasrda qanday yoziladi?", "options": ["1/5", "1/2", "1/4", "2/5"] }
+      ]
+    },
+    {
+      "code": "MATH-0002",
+      "title": "Matematika — foiz va algebra",
+      "answers": "cccbc",
+      "questions": [
+        { "q": "200 ning 15% i nechaga teng?", "options": ["20", "25", "30", "35"] },
+        { "q": "7² nechaga teng?", "options": ["14", "42", "49", "56"] },
+        { "q": "2x + 6 = 14 tenglamada x nechaga teng?", "options": ["2", "3", "4", "5"] },
+        { "q": "Aylananing yuzasi qaysi formula bilan topiladi?", "options": ["2πr", "πr²", "πd", "r²"] },
+        { "q": "3/4 + 1/4 nechaga teng?", "options": ["1/2", "3/4", "1", "4/8"] }
+      ]
+    },
+    {
+      "code": "MATH-0003",
+      "title": "Matematika — sonlar va darajalar",
+      "answers": "abcbb",
+      "questions": [
+        { "q": "100 − 37 nechaga teng?", "options": ["63", "67", "73", "77"] },
+        { "q": "9 × 9 nechaga teng?", "options": ["72", "81", "89", "99"] },
+        { "q": "4 va 6 sonlarining eng kichik umumiy karralisi (EKUK) nechaga teng?", "options": ["8", "10", "12", "24"] },
+        { "q": "2³ nechaga teng?", "options": ["6", "8", "9", "12"] },
+        { "q": "1 kilometr necha metrga teng?", "options": ["100", "1000", "10000", "100000"] }
+      ]
+    }
+  ]
+}

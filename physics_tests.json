@@ -1,17 +1,41 @@
-[
-  {"code": "PHY101", "title": "Mexanika", "questions": [
-    {"question": "Erkin tushish tezlanishi (g) taxminan qancha?", "options": ["9,8 m/s²", "8,9 m/s²", "10,8 m/s²", "6,7 m/s²"], "answer": 0},
-    {"question": "Kuch birligi nima?", "options": ["Joul", "Nyuton", "Vatt", "Paskal"], "answer": 1},
-    {"question": "Tezlik formulasi qaysi?", "options": ["v = s/t", "v = s·t", "v = t/s", "v = m·a"], "answer": 0}
-  ]},
-  {"code": "PHY102", "title": "Elektr", "questions": [
-    {"question": "Om qonuni qanday ifodalanadi?", "options": ["I = U·R", "I = U/R", "I = R/U", "U = I/R"], "answer": 1},
-    {"question": "Quvvat birligi nima?", "options": ["Nyuton", "Joul", "Vatt", "Amper"], "answer": 2},
-    {"question": "Kuchlanish birligi?", "options": ["Amper", "Volt", "Om", "Vatt"], "answer": 1}
-  ]},
-  {"code": "PHY103", "title": "Termodinamika", "questions": [
-    {"question": "Suvning qaynash temperaturasi (normal bosimda)?", "options": ["90°C", "100°C", "110°C", "80°C"], "answer": 1},
-    {"question": "Absolyut nol necha gradus?", "options": ["-273°C", "-100°C", "-373°C", "0°C"], "answer": 0},
-    {"question": "Issiqlik miqdori formulasi?", "options": ["Q = m·c·Δt", "Q = m/c", "Q = c/Δt", "Q = m·c"], "answer": 0}
-  ]}
-]
+{
+  "_comment": "Fizika testlari. 'answers' — variant harflari ketma-ket (masalan 'bbbbc'). Foydalanuvchi ham xuddi shu formatda javob yuboradi.",
+  "tests": [
+    {
+      "code": "PHY-0001",
+      "title": "Fizika — asosiy tushunchalar",
+      "answers": "bbbbc",
+      "questions": [
+        { "q": "Kuchning o'lchov birligi nima?", "options": ["Joul", "Nyuton", "Vatt", "Paskal"] },
+        { "q": "Yorug'lik tezligi taxminan qancha?", "options": ["3×10⁶ m/s", "3×10⁸ m/s", "3×10¹⁰ m/s", "3×10⁵ m/s"] },
+        { "q": "Erkin tushish tezlanishi (g) taxminan qancha?", "options": ["8,9 m/s²", "9,8 m/s²", "10,8 m/s²", "11,8 m/s²"] },
+        { "q": "Kinetik energiya qaysi formula bilan topiladi?", "options": ["mgh", "½mv²", "mv", "ma"] },
+        { "q": "Quvvatning o'lchov birligi nima?", "options": ["Nyuton", "Joul", "Vatt", "Amper"] }
+      ]
+    },
+    {
+      "code": "PHY-0002",
+      "title": "Fizika — elektr va issiqlik",
+      "answers": "abccb",
+      "questions": [
+        { "q": "Om qonuni qanday ifodalanadi?", "options": ["V = IR", "V = I/R", "V = R/I", "I = VR"] },
+        { "q": "Elektr tok kuchining o'lchov birligi nima?", "options": ["Volt", "Amper", "Om", "Vatt"] },
+        { "q": "Suv normal sharoitda necha gradusda qaynaydi?", "options": ["90 °C", "95 °C", "100 °C", "110 °C"] },
+        { "q": "Quyidagilardan qaysi biri vektor kattalik?", "options": ["massa", "tezlik (skalyar)", "tezlik (vektor)", "temperatura"] },
+        { "q": "Energiyaning o'lchov birligi nima?", "options": ["Nyuton", "Joul", "Vatt", "Paskal"] }
+      ]
+    },
+    {
+      "code": "PHY-0003",
+      "title": "Fizika — kuch va to'lqinlar",
+      "answers": "acaac",
+      "questions": [
+        { "q": "Nyutonning ikkinchi qonuni qanday ifodalanadi?", "options": ["F = ma", "F = m/a", "F = a/m", "F = m + a"] },
+        { "q": "Yorug'lik qaysi muhitda eng tez tarqaladi?", "options": ["suv", "shisha", "vakuum", "havo"] },
+        { "q": "Chastotaning o'lchov birligi nima?", "options": ["Gerts", "Sekund", "Metr", "Nyuton"] },
+        { "q": "Ish qaysi formula bilan topiladi?", "options": ["F × d", "F / d", "d / F", "F + d"] },
+        { "q": "Tovush qaysi muhitda tarqala olmaydi?", "options": ["suv", "havo", "vakuum", "po'lat"] }
+      ]
+    }
+  ]
+}
