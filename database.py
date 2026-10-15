@@ -873,6 +873,58 @@ class Database:
         return [dict(r) for r in rows]
 
     # ================================================================== #
+    # v7: test ishlaganlar statistikasi (leaderboard)
+    # ================================================================== #
+    async def test_code_exists(self, code: str) -> bool:
+        """Test kodi band yoki yo'qligini tekshiradi (math/physics reyestri)."""
+        cur = await self.db.execute(
+            "SELECT 1 FROM test_codes WHERE code = ?", ((code or "").strip().upper(),)
+        )
+        return await cur.fetchone() is not None
+
+    async def count_test_takers(self) -> int:
+        """Test ishlagan (kamida bitta topshirgan) foydalanuvchilar soni."""
+        cur = await self.db.execute(
+            "SELECT COUNT(DISTINCT user_id) AS c FROM test_submissions"
+        )
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def user_test_count(self, user_id: int) -> int:
+        """Bitta foydalanuvchi nechta test ishlaganini qaytaradi."""
+        cur = await self.db.execute(
+            "SELECT COUNT(*) AS c FROM test_submissions WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def test_leaderboard(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Test ishlagan foydalanuvchilar ro'yxati: har biri nechta test ishlagan.
+
+        Qaytaradi: user_id, username, first_name, tests_taken, total_correct,
+        total_questions, last_at (oxirgi topshirilgan vaqt).
+        """
+        cur = await self.db.execute(
+            """
+            SELECT s.user_id                                   AS user_id,
+                   COALESCE(u.username, '')                    AS username,
+                   COALESCE(u.first_name, '')                  AS first_name,
+                   COUNT(*)                                    AS tests_taken,
+                   COALESCE(SUM(s.correct), 0)                 AS total_correct,
+                   COALESCE(SUM(s.total), 0)                   AS total_questions,
+                   MAX(s.created_at)                           AS last_at
+            FROM test_submissions s
+            LEFT JOIN users u ON u.user_id = s.user_id
+            GROUP BY s.user_id
+            ORDER BY tests_taken DESC, last_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ================================================================== #
     # v3: Admin tasdiqlash oqimi
     # ================================================================== #
     async def create_pending_approval(

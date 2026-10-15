@@ -309,33 +309,57 @@ def _split(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
+# --- Navigatsiya tarixi (har bir foydalanuvchi uchun alohida) ---
+_nav_stack: dict[int, list[dict]] = {}
+_NAV_MAX = 25
+
+
+def _push_nav(cb: CallbackQuery) -> None:
+    """Joriy ekranni navigatsiya tarixiga saqlaydi ('⬅️ Orqaga' uchun)."""
+    try:
+        msg = cb.message
+        if msg is None or not getattr(msg, "text", None):
+            return
+        stack = _nav_stack.setdefault(cb.from_user.id, [])
+        if stack and stack[-1].get("text") == msg.text:
+            return
+        stack.append({"text": msg.text, "markup": msg.reply_markup})
+        if len(stack) > _NAV_MAX:
+            stack.pop(0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def back_kb():
-    """Har bir javob tagiga qo'shiladigan '⬅️ Bosh menyu' tugmasi."""
+    """Har bir javob tagiga qo'shiladigan '⬅️ Orqaga' + '🏠 Asosiy menyu' tugmalari."""
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
+    kb.button(text="⬅️ Orqaga", callback_data="nav:back")
+    kb.button(text="🏠 Asosiy menyu", callback_data="menu:main")
+    kb.adjust(2)
     return kb.as_markup()
 
 
 def _with_back(markup):
-    """Berilgan klaviaturaga '⬅️ Bosh menyu' tugmasini qo'shadi (agar yo'q bo'lsa)."""
+    """Berilgan klaviaturaga '⬅️ Orqaga' va '🏠 Asosiy menyu' tugmalarini qo'shadi."""
     if markup is None:
         return back_kb()
     if not isinstance(markup, InlineKeyboardMarkup):
         return markup
-    has_main = any(
-        getattr(b, "callback_data", None) == "menu:main"
+    flat = [
+        getattr(b, "callback_data", None)
         for row in markup.inline_keyboard
         for b in row
-    )
-    is_main_menu = any(
-        getattr(b, "callback_data", None) == "menu:ai"
-        for row in markup.inline_keyboard
-        for b in row
-    )
-    if not has_main and not is_main_menu:
-        markup.inline_keyboard.append(
-            [InlineKeyboardButton(text="⬅️ Bosh menyu", callback_data="menu:main")]
-        )
+    ]
+    # Asosiy menyuning o'zida ortiqcha tugma qo'shmaymiz
+    if "menu:ai" in flat:
+        return markup
+    row = []
+    if "nav:back" not in flat:
+        row.append(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="nav:back"))
+    if "menu:main" not in flat:
+        row.append(InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="menu:main"))
+    if row:
+        markup.inline_keyboard.append(row)
     return markup
 
 
@@ -411,7 +435,8 @@ async def _ans(message: Message, text: str, **kwargs) -> None:
 
 
 async def _edit(cb: CallbackQuery, text: str, **kwargs) -> None:
-    """Callback xabarini tahrirlaydi va tagiga '⬅️ Bosh menyu' tugmasini qo'shadi."""
+    """Callback xabarini tahrirlaydi va tagiga navigatsiya tugmalarini qo'shadi."""
+    _push_nav(cb)
     kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
     await cb.message.edit_text(text, **kwargs)
 
@@ -499,8 +524,9 @@ def main_menu_kb(is_admin: bool = False):
     kb.button(text="🎯 Testlar (umumiy)", callback_data="menu:quiz")
     kb.button(text="🔄 Suhbatni tozalash", callback_data="menu:reset")
     if is_admin:
+        kb.button(text="➕ Test qo'shish", callback_data="menu:testadd")
         kb.button(text="📊 Statistika", callback_data="menu:stats")
-        kb.adjust(1, 2, 2, 1, 1, 1, 1, 1)
+        kb.adjust(1, 2, 2, 1, 1, 1, 1, 1, 1)
     else:
         kb.adjust(1, 2, 2, 1, 1, 1, 1)
     return kb.as_markup()
@@ -602,12 +628,23 @@ def reminders_kb():
 
 
 def stats_admin_kb():
-    """Statistika bo'limi (faqat admin): kanal qo'shish + kanallar statistikasi."""
+    """Statistika bo'limi (faqat admin): test ishlaganlar + kanal boshqaruvi."""
     kb = InlineKeyboardBuilder()
+    kb.button(text="🏆 Test ishlaganlar", callback_data="stats:testtakers")
     kb.button(text="➕ Kanal qo'shish", callback_data="stats:chanadd")
     kb.button(text="📈 Kanallar statistikasi", callback_data="stats:chanstats")
     kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def testadd_subject_kb():
+    """Test qo'shish: fan tanlash."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➗ Matematika", callback_data="tadd:sub:math")
+    kb.button(text="⚛️ Fizika", callback_data="tadd:sub:physics")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -638,7 +675,9 @@ async def send_question(chat_id: int, user_id: int) -> None:
         f"🎯 <b>Savol {idx + 1}/{len(qids)}</b>  ·  {esc(q['topic'])}\n\n"
         f"{esc(q['question'])}"
     )
-    await bot.send_message(chat_id, text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await bot.send_message(
+        chat_id, text, reply_markup=_with_back(kb.as_markup()), parse_mode="HTML"
+    )
 
 
 async def finish_quiz(chat_id: int, user_id: int) -> None:
@@ -675,7 +714,9 @@ async def finish_quiz(chat_id: int, user_id: int) -> None:
         lines.append("\n🎉 Barcha savollarga to'g'ri javob berdingiz!")
 
     lines.append("\n🔁 Yana o'tash uchun: /quiz")
-    await bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+    await bot.send_message(
+        chat_id, "\n".join(lines), reply_markup=back_kb(), parse_mode="HTML"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1183,6 +1224,7 @@ async def build_stats_text(u) -> str:
         f"🤖 AI so'rovlar: *{all_stats.get('ai_requests', 0)}*",
         f"⚡ Tezkor javoblar (ishlatilgan): *{all_stats.get('instant_hits', 0)}*",
         f"🏁 O'tilgan testlar: *{all_stats.get('quizzes_taken', 0)}*",
+        f"👥 Test ishlaganlar: *{await db.count_test_takers()}*",
     ]
 
     if top:
@@ -1408,6 +1450,32 @@ async def on_menu_main(cb: CallbackQuery) -> None:
         await _ans(cb.message, "🏠 *Asosiy menyu*:", reply_markup=_menu_kb_for(cb.from_user))
 
 
+@dp.callback_query(F.data == "nav:back")
+async def on_nav_back(cb: CallbackQuery) -> None:
+    """'⬅️ Orqaga' — oldingi ekranga qaytaradi."""
+    await cb.answer()
+    stack = _nav_stack.get(cb.from_user.id) or []
+    if not stack:
+        # Tarix bo'sh — asosiy menyuga qaytaramiz
+        try:
+            await cb.message.edit_text(
+                "🏠 *Asosiy menyu* — bo'limni tanlang:",
+                reply_markup=_menu_kb_for(cb.from_user),
+            )
+        except Exception:  # noqa: BLE001
+            await _ans(cb.message, "🏠 *Asosiy menyu*:",
+                       reply_markup=_menu_kb_for(cb.from_user))
+        return
+    prev = stack.pop()
+    try:
+        await cb.message.edit_text(prev["text"], reply_markup=prev["markup"])
+    except Exception:  # noqa: BLE001
+        try:
+            await _ans(cb.message, prev["text"], reply_markup=prev["markup"])
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @dp.callback_query(F.data == "menu:ai")
 async def on_menu_ai(cb: CallbackQuery) -> None:
     """AI bilan erkin suhbat rejimi."""
@@ -1566,6 +1634,135 @@ async def on_stats_chanstats(cb: CallbackQuery) -> None:
             f"  👥 A'zolar: *{members}* · 📨 Postlar: *{posts}* (yuborilgan: *{sent}*)"
         )
     await _edit(cb, "\n".join(lines), reply_markup=stats_admin_kb())
+
+
+# --------------------------------------------------------------------------- #
+# v7: Test qo'shish bo'limi (admin) va test natijasi tahlili
+# --------------------------------------------------------------------------- #
+@dp.callback_query(F.data == "menu:testadd")
+async def on_menu_testadd(cb: CallbackQuery) -> None:
+    """"Test qo'shish" bo'limi — faqat admin."""
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, 
+            "🔒 *Test qo'shish* faqat admin uchun.\n\n"
+            f"Admin: @{config.ADMIN_USERNAMES[0] if config.ADMIN_USERNAMES else 'admin'}"
+        )
+        return
+    await _edit(cb, 
+        "➕ *Test qo'shish*\n\n"
+        "Qaysi fandan test qo'shmoqchisiz?\n\n"
+        "ℹ️ Test *kodi*, *sarlavhasi*, *savollari* va *javoblari* ni ketma-ket "
+        "kiritasiz. Kod band bo'lmasligi kerak.",
+        reply_markup=testadd_subject_kb(),
+    )
+
+
+@dp.callback_query(F.data.startswith("tadd:sub:"))
+async def on_tadd_subject(cb: CallbackQuery) -> None:
+    """Test qo'shish: fan tanlandi — kod so'raladi."""
+    subject = cb.data.split(":")[2]
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, "🔒 Faqat admin uchun.")
+        return
+    if subject not in ("math", "physics"):
+        await _edit(cb, "⚠️ Noma'lum fan.")
+        return
+    name = "Matematika" if subject == "math" else "Fizika"
+    await db.set_user_state(u.id, "test_add2", {
+        "subject": subject, "step": "code", "code": "",
+        "title": "", "questions": [],
+    })
+    await _edit(cb, 
+        f"➕ *{name} — test qo'shish*\n\n"
+        "1️⃣ Test *kodini* yuboring (2–32 belgi: harflar, raqamlar, `-`, `_`).\n\n"
+        "Misol: `ALG-1`, `MATH-9`, `12345`",
+        reply_markup=testadd_subject_kb(),
+    )
+
+
+@dp.callback_query(F.data == "stats:testtakers")
+async def on_stats_testtakers(cb: CallbackQuery) -> None:
+    """Test ishlagan foydalanuvchilar ro'yxati va har biri nechta test ishlagani."""
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, "🔒 Faqat admin uchun.")
+        return
+    rows = await db.test_leaderboard(50)
+    if not rows:
+        await _edit(cb, 
+            "🏆 Hozircha hech kim test ishlamagan.\n\n"
+            "Foydalanuvchi test kodini yuborib test ishlagach, shu yerda ko'rinadi.",
+            reply_markup=stats_admin_kb(),
+        )
+        return
+
+    total_takers = await db.count_test_takers()
+    lines = [f"🏆 *Test ishlaganlar* ({total_takers} ta foydalanuvchi)\n"]
+    for i, r in enumerate(rows, 1):
+        uid = r["user_id"]
+        uname = f"@{r['username']}" if r.get("username") else (r.get("first_name") or "noma'lum")
+        tests = int(r.get("tests_taken") or 0)
+        tot_c = int(r.get("total_correct") or 0)
+        tot_q = int(r.get("total_questions") or 0)
+        pct = round(tot_c / tot_q * 100) if tot_q else 0
+        last = ""
+        try:
+            last = " · 🕒 " + datetime.fromtimestamp(float(r["last_at"])).strftime("%m-%d %H:%M")
+        except Exception:  # noqa: BLE001
+            pass
+        lines.append(
+            f"{i}. *{esc(uname)}*\n"
+            f"   🆔 `{uid}`\n"
+            f"   📝 Testlar: *{tests}* ta · 🎯 O'rtacha: *{pct}%* ({tot_c}/{tot_q}){last}"
+        )
+    await _edit(cb, "\n".join(lines), reply_markup=stats_admin_kb())
+
+
+async def analyze_result_with_ai(subject: str, title: str, correct: int, total: int,
+                                 detail: list[dict], questions: list[dict]) -> str | None:
+    """Test natijasini AI orqali tahlil qiladi: zaif joylar va tavsiyalar.
+
+    Xato bo'lsa yoki barcha javob to'g'ri bo'lsa — ``None`` qaytaradi.
+    """
+    wrong = [d for d in detail if not d.get("ok")]
+    if not wrong:
+        return None
+    rows = []
+    for d in wrong[:12]:
+        qt = ""
+        try:
+            idx = int(d.get("i", 0)) - 1
+            if 0 <= idx < len(questions):
+                qt = questions[idx].get("q", "")
+        except Exception:  # noqa: BLE001
+            qt = d.get("q", "")
+        rows.append(
+            f"- Savol {d.get('i') or d.get('key')}: {qt} "
+            f"| o'quvchi: {d.get('user')} | to'g'ri: {d.get('correct')}"
+        )
+    prompt = (
+        f"Test: {title} (fan: {subject})\n"
+        f"Natija: {correct}/{total} to'g'ri.\n"
+        f"Xato javoblar:\n" + "\n".join(rows) + "\n\n"
+        "Yuqoridagi natijani O'QUVCHIGA tahlil qilib ber:\n"
+        "1) Qaysi mavzularda zaif ekani (xatolardan kelib chiqib),\n"
+        "2) Har bir xato uchun qisqa izoh (nima uchun xato),\n"
+        "3) 2-3 ta aniq tavsiya (nima takrorlash kerak).\n"
+        "O'zbek tilida, qisqa va foydali qilib yoz."
+    )
+    try:
+        return await pool.generate(
+            prompt,
+            system_instruction=SYSTEM_PROMPT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Natija tahlili (AI) ishlamadi: %s", exc)
+        return None
 
 
 @dp.callback_query(F.data == "menu:quiz")
@@ -1828,6 +2025,96 @@ async def handle_test_add(message: Message, state: dict, text: str) -> None:
         await notify_admins_approval(aid, u, subject, payload)
 
 
+async def handle_test_add2(message: Message, state: dict, text: str) -> None:
+    """Admin uchun test qo'shish: kod -> sarlavha -> savollar -> javoblar."""
+    user_id = message.from_user.id
+    subject = state["subject"]
+    step = state["step"]
+    data = state
+
+    if step == "code":
+        code = text.strip().upper()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{2,32}", code):
+            await _ans(message, 
+                "⚠️ Kod 2–32 belgidan iborat bo'lsin (harflar, raqamlar, `-`, `_`).\n"
+                "Misol: `ALG-1` yoki `12345`"
+            )
+            return
+        if await db.test_code_exists(code) or await db.pdf_test_code_exists(code):
+            await _ans(message, f"⚠️ `{code}` kodi allaqachon band. Boshqa kod yuboring.")
+            return
+        data["code"] = code
+        data["step"] = "title"
+        await db.set_user_state(user_id, "test_add2", data)
+        await _ans(message, 
+            f"✅ Kod: `{code}`\n\n"
+            "2️⃣ Endi test *sarlavhasini* yuboring (masalan: *Algebra asoslari*)."
+        )
+        return
+
+    if step == "title":
+        data["title"] = text.strip()[:120]
+        data["step"] = "questions"
+        await db.set_user_state(user_id, "test_add2", data)
+        await _ans(message, 
+            "3️⃣ Endi savollarni yuboring. Har bir savolni alohida blok qilib yozing:\n"
+            "birinchi qatorda savol, keyingi qatorlarda variantlar.\n"
+            "Bloklar orasida bo'sh qator qoldiring.\n\n"
+            "Misol:\n"
+            "2+2 nechaga teng?\n3\n4\n5\n6\n\n"
+            "5×5 nechaga teng?\n20\n25\n30\n35"
+        )
+        return
+
+    if step == "questions":
+        questions = []
+        for block in re.split(r"\n\s*\n", text.strip()):
+            lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+            if len(lines) < 3:
+                continue
+            q = lines[0]
+            opts = lines[1:5]
+            if len(opts) < 2:
+                continue
+            questions.append({"q": q, "options": opts})
+        if not questions:
+            await _ans(message, 
+                "⚠️ Savollar formati noto'g'ri. Har bir savolni alohida blok qilib "
+                "yuboring: birinchi qatorda savol, keyingi qatorlarda variantlar."
+            )
+            return
+        data["questions"] = questions
+        data["step"] = "answers"
+        await db.set_user_state(user_id, "test_add2", data)
+        await _ans(message, 
+            f"✅ {len(questions)} ta savol qabul qilindi.\n\n"
+            "4️⃣ Endi to'g'ri javoblarni variant harflari ketma-ketligi sifatida yuboring.\n"
+            f"Misol: `{('a' * len(questions))}` (a, b, c, d harflari)."
+        )
+        return
+
+    if step == "answers":
+        answers = re.sub(r"[^a-f]", "", text.lower())
+        n = len(data["questions"])
+        if len(answers) != n:
+            await _ans(message, 
+                f"⚠️ Javoblar soni savollar soniga teng bo'lishi kerak: "
+                f"{n} ta harf kerak, siz {len(answers)} ta yubordingiz."
+            )
+            return
+        code = data["code"]
+        await db.add_test(subject, code, data["title"], data["questions"],
+                          answers, created_by=user_id)
+        await db.clear_user_state(user_id)
+        await _ans(message, 
+            f"✅ Test bazaga qo'shildi!\n\n"
+            f"🔑 Kod: `{code}`\n📄 {esc(data['title'])}\n"
+            f"❓ Savollar: {n} ta\n\n"
+            f"Endi `{code}` kodini yuborib testni boshlash mumkin."
+        )
+        return
+
+
 async def notify_admins_approval(aid: int, user, subject: str, payload: dict) -> None:
     """Adminga tasdiqlash so'rovini yuboradi."""
     admin_ids = await get_admin_ids()
@@ -2003,6 +2290,13 @@ async def handle_test_answers(message: Message, state: dict, text: str) -> None:
     result = format_test_result(code, test["title"], correct, n, detail, test["questions"])
     await _ans(message, result, parse_mode="HTML")
 
+    # Natijani tahlil qilib (taqdim etib) qo'shimcha izoh yuboramiz
+    analysis = await analyze_result_with_ai(
+        test["subject"], test["title"], correct, n, detail, test["questions"]
+    )
+    if analysis:
+        await _safe_send(message, "🤖 *Tahlil va tavsiyalar*\n\n" + analysis)
+
 
 # --------------------------------------------------------------------------- #
 # Handlers — PDF testlar (qo'shish + tekshirish)
@@ -2138,6 +2432,23 @@ async def handle_pdf_answers_input(message: Message, state: dict, text: str) -> 
 
     result = format_pdf_result(code, test["title"], correct, total, detail)
     await _ans(message, result, parse_mode="HTML")
+
+    # PDF test uchun ham natija tahlili
+    questions = []
+    for q in test.get("questions", []):
+        opts = q.get("options") or []
+        label = q.get("q", "")
+        if opts:
+            label += " (" + ", ".join(str(o) for o in opts[:6]) + ")"
+        questions.append({"q": label})
+    analysis = await analyze_result_with_ai(
+        test.get("subject", "umumiy"), test["title"], correct, total,
+        [{"i": d.get("key"), "user": d.get("user"), "correct": d.get("correct"),
+          "ok": d.get("ok")} for d in detail],
+        questions,
+    )
+    if analysis:
+        await _safe_send(message, "🤖 *Tahlil va tavsiyalar*\n\n" + analysis)
 
 
 # --------------------------------------------------------------------------- #
@@ -3104,6 +3415,9 @@ async def on_text(message: Message) -> None:
         if st == "test_add":
             await handle_test_add(message, state["data"], text)
             return
+        if st == "test_add2":
+            await handle_test_add2(message, state["data"], text)
+            return
         if st == "test_answers":
             await handle_test_answers(message, state["data"], text)
             return
@@ -3140,11 +3454,15 @@ async def on_text(message: Message) -> None:
         await handle_test_code(message, text.strip().upper())
         return
 
-    # 1b) PDF test kodi (masalan '12345') — mavjud bo'lsa javob oynasini chiqaramiz
+    # 1b) Boshqa test kodlari (admin kiritgan kod yoki PDF) — mavjud bo'lsa javob oynasi
     if re.fullmatch(r"[A-Za-z0-9_-]{2,32}", text.strip()):
-        pdf_test = await db.get_pdf_test_by_code(text.strip())
+        raw = text.strip()
+        if await db.test_code_exists(raw):
+            await handle_test_code(message, raw.upper())
+            return
+        pdf_test = await db.get_pdf_test_by_code(raw)
         if pdf_test:
-            await handle_pdf_answers_code(message, text.strip())
+            await handle_pdf_answers_code(message, raw)
             return
 
     # 2) Faol test bo'lsa — tugmalardan foydalanishni eslatamiz
@@ -3222,6 +3540,7 @@ async def reminder_loop() -> None:
                     await bot.send_message(
                         r["user_id"],
                         f"⏰ *Eslatma!*\n\n📌 {esc(r['text'])}",
+                        reply_markup=back_kb(),
                         parse_mode="HTML",
                     )
                 except Exception as exc:  # noqa: BLE001
