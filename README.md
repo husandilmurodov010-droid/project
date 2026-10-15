@@ -88,6 +88,51 @@ Asosiy menyu ostidagi **«🧰 Vositalar»** bo'limida endi faqat **2 ta tugma**
   (`post_loop`) muddati kelgan postlarni avtomatik yuboradi.
 - Kanal ma'lumotlari bazada saqlanadi (`channels`, `scheduled_posts`).
 
+### 📄 PDF dan test qo'shish (v5'da qo'shildi)
+Admin (yoki ruxsat olgan foydalanuvchi) **PDF fayl yuborib** undan test qo'sha oladi.
+
+**Oqim:** «🧰 Vositalar → ➕ Savol qo'shish → 📄 PDF dan test» → PDF yuborish →
+kod → sarlavha → to'g'ri javoblar.
+
+1. **PDF yuborish** — bot PDF matnini `pypdf` bilan o'qib, savollarni avtomatik
+   ajratadi. Savollar `1) ...` ko'rinishida bo'lishi kerak.
+2. **Kod kiritish** — har bir test **ixtiyoriy kod** bilan kodlanadi (masalan
+   `12345`). Kod unikal bo'lishi shart; band bo'lsa bot ogohlantiradi.
+3. **Sarlavha** — test nomi (masalan *Matematika 1-chorak testi*).
+4. **To'g'ri javoblar** — quyidagi formatlarda kiritiladi.
+
+#### Test kodlari
+- Kod — admin o'zi kiritadigan ixtiyoriy belgi (masalan `12345`, `math-1`).
+- Kod orqali foydalanuvchilar testni topadi va javob tekshiradi.
+- Kodlar `pdf_tests` jadvalida saqlanadi (`code` — unikal).
+
+#### Ochiq savol formati (`36a)2.3`)
+- **Test (MC) savollar** — variant harflari ketma-ketligi: `abcdba`
+  (har bir savol uchun bitta harf).
+- **Ochiq (yozma) savollar** — `savol_raqami + variant_harfi + ")" + javob`:
+  - `36a)2.3` — 36-savolning **a)** sharti, javobi `2.3`
+  - `36b)4.5` — 36-savolning **b)** sharti, javobi `4.5`
+  - `36)2.3` — faqat raqam bilan ham mumkin
+- Ikkalasini birga yuborish mumkin: `abcdba 36a)2.3 36b)4.5`
+
+### 📄 PDF testlarni tekshirish (asosiy menyu)
+Asosiy menyuda **«📄 PDF testlarni tekshirish»** tugmasi bor:
+
+1. Tugma bosiladi → bot **test kodini so'raydi** («Test kodini kiriting:»).
+2. Kod kiritiladi → bot **javob kiritish oynasini** chiqaradi (savollar +
+   variantlar + format ko'rsatmasi).
+3. Foydalanuvchi javoblarni yuboradi (`abcdba` yoki `36a)2.3`).
+
+#### Javobni tekshirish va natija
+- Bot javoblarni to'g'ri kalit bilan solishtiradi.
+- **Xato savollar aniq ko'rsatiladi** — savol raqami, foydalanuvchi javobi va
+  to'g'ri javob.
+- Umumiy natija: **nechta to'g'ri / nechta xato, foiz va baho** (🏆/👍/📚).
+- Natija `test_submissions` jadvalida saqlanadi.
+
+> ℹ️ PDF dan test qo'shish **faqat admin** uchun. Boshqa foydalanuvchilar
+> «➕ Savol qo'shish» bosganda adminga ruxsat so'rovi yuboriladi.
+
 ### 🆕 v4'da qo'shildi (deploy uchun)
 - **`health_server.py`** — Render Web Service uchun health-check + keep-alive
   (`/health`, `/ready`, `/ping`, `/status`, `/`)
@@ -729,6 +774,15 @@ Render o'zi qayta deploy qiladi.
 - ✅ Vaqt tahlili (`+2h`, `09:30`, aniq sana)
 
 **Jami: 59/59 test o'tdi.**
+
+`python test_pdf.py` (v5 — PDF test tizimi):
+- ✅ PDF matnidan savollarni ajratish (test + ochiq savollar)
+- ✅ Javob kiritmasini tahlil qilish (`abcdba`, `36a)2.3`, `36)2.3`)
+- ✅ Javoblarni tekshirish va xatolarni aniqlash
+- ✅ Baza: `pdf_tests` jadvali (qo'shish, olish, kod bandligi, o'chirish)
+- ✅ Haqiqiy PDF yaratib, matn ajratish (pypdf)
+
+**Jami: 32/32 test o'tdi.**
 
 ---
 

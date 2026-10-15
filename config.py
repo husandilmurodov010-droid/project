@@ -95,6 +95,12 @@ DEFAULT_CHANNEL_ID = os.getenv("DEFAULT_CHANNEL_ID", "").strip()
 # Rejalashtirilgan postlarni tekshirish oralig'i (sekund).
 POST_CHECK_INTERVAL = int(os.getenv("POST_CHECK_INTERVAL", "30"))
 
+# --- PDF testlar ---
+# PDF dan matn ajratib olish uchun maksimal fayl hajmi (MB).
+PDF_MAX_MB = int(os.getenv("PDF_MAX_MB", "20"))
+# PDF dan ajratib olinadigan maksimal savol soni.
+PDF_MAX_QUESTIONS = int(os.getenv("PDF_MAX_QUESTIONS", "200"))
+
 # --- Ovozli rejim ---
 # Ovozli xabarlarni matnga o'girish uchun model (Gemini audio input).
 VOICE_MODEL = os.getenv("VOICE_MODEL", "gemini-3.5-flash-lite").strip()

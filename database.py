@@ -239,6 +239,21 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
     created_at     REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_spost_due ON scheduled_posts(sent, run_at);
+
+-- ===================== v5: PDF testlar =====================
+
+CREATE TABLE IF NOT EXISTS pdf_tests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT    NOT NULL UNIQUE,   -- admin kiritgan kod (masalan '12345')
+    title       TEXT    NOT NULL,
+    subject     TEXT    DEFAULT 'umumiy',
+    questions   TEXT    NOT NULL,          -- JSON: [{"n":1,"key":"1","q":"..","options":[..],"type":"mc"|"open"}]
+    answers     TEXT    NOT NULL,          -- JSON: {"1":"a","36a":"2.3"}
+    source_file TEXT    DEFAULT '',
+    created_by  INTEGER,
+    created_at  REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pdf_tests_code ON pdf_tests(code);
 """
 
 
@@ -1150,4 +1165,75 @@ class Database:
 
     async def delete_scheduled_post(self, pid: int) -> None:
         await self.db.execute("DELETE FROM scheduled_posts WHERE id = ?", (pid,))
+        await self.db.commit()
+
+    # ================================================================== #
+    # v5: PDF testlar (kod bilan kodlangan, ochiq savollarni qo'llab-quvvatlaydi)
+    # ================================================================== #
+    async def add_pdf_test(
+        self,
+        code: str,
+        title: str,
+        questions: list[dict[str, Any]],
+        answers: dict[str, str],
+        subject: str = "umumiy",
+        source_file: str = "",
+        created_by: Optional[int] = None,
+    ) -> int:
+        """PDF dan olingan testni bazaga qo'shadi (kod unikal bo'lishi shart)."""
+        code = (code or "").strip()
+        cur = await self.db.execute(
+            """
+            INSERT INTO pdf_tests
+                (code, title, subject, questions, answers, source_file, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                code,
+                title,
+                subject,
+                json.dumps(questions, ensure_ascii=False),
+                json.dumps(answers, ensure_ascii=False),
+                source_file,
+                created_by,
+                time.time(),
+            ),
+        )
+        await self.db.commit()
+        log.info("PDF test qo'shildi: %s (%s savol)", code, len(questions))
+        return int(cur.lastrowid)
+
+    async def get_pdf_test_by_code(self, code: str) -> Optional[dict[str, Any]]:
+        code = (code or "").strip()
+        cur = await self.db.execute("SELECT * FROM pdf_tests WHERE code = ?", (code,))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["questions"] = json.loads(d["questions"] or "[]")
+        d["answers"] = json.loads(d["answers"] or "{}")
+        return d
+
+    async def pdf_test_code_exists(self, code: str) -> bool:
+        cur = await self.db.execute(
+            "SELECT 1 FROM pdf_tests WHERE code = ?", ((code or "").strip(),)
+        )
+        return await cur.fetchone() is not None
+
+    async def list_pdf_tests(self, limit: int = 50) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT id, code, title, subject, created_at FROM pdf_tests "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def count_pdf_tests(self) -> int:
+        cur = await self.db.execute("SELECT COUNT(*) AS c FROM pdf_tests")
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def delete_pdf_test(self, code: str) -> None:
+        await self.db.execute("DELETE FROM pdf_tests WHERE code = ?", ((code or "").strip(),))
         await self.db.commit()

@@ -350,8 +350,9 @@ def main_menu_kb():
     kb.button(text="➗ Matematika", callback_data="menu:math")
     kb.button(text="⚛️ Fizika", callback_data="menu:physics")
     kb.button(text="🧰 Vositalar", callback_data="menu:tools")
+    kb.button(text="📄 PDF testlarni tekshirish", callback_data="menu:pdftest")
     kb.button(text="🎯 Testlar (umumiy)", callback_data="menu:quiz")
-    kb.adjust(2, 2, 1, 1)
+    kb.adjust(2, 2, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -399,8 +400,9 @@ def qadd_type_kb():
     kb.button(text="✍️ IELTS Writing", callback_data="qadd:type:writing")
     kb.button(text="➗ Matematika", callback_data="qadd:type:math")
     kb.button(text="⚛️ Fizika", callback_data="qadd:type:phys")
+    kb.button(text="📄 PDF dan test", callback_data="qadd:type:pdf")
     kb.button(text="⬅️ Orqaga", callback_data="menu:tools")
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -556,6 +558,174 @@ def format_test_result(code: str, title: str, correct: int, total: int,
                 f"• {d['i']}. {esc(qtext)}\n"
                 f"  Siz: <b>{esc(d['user'].upper())}</b> · "
                 f"To'g'ri: <b>{esc(d['correct'].upper())}</b>"
+            )
+    else:
+        lines.append("\n🎉 Barcha javoblar to'g'ri!")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# PDF test yordamchilari
+# --------------------------------------------------------------------------- #
+_MC_OPT_RE = re.compile(r"^\s*([A-F])[\)\.]\s*(.+)$")
+_OPEN_SUB_RE = re.compile(r"^\s*([a-f])[\)\.]\s*(.+)$")
+_Q_LINE_RE = re.compile(r"^\s*(\d{1,3})\s*[\)\.]\s*(.+)$")
+_ANS_TOKEN_RE = re.compile(r"^(\d{1,3})([a-fA-F])?\)(.+)$")
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """PDF baytlaridan matn ajratadi (pypdf)."""
+    try:
+        import io
+
+        from pypdf import PdfReader
+    except Exception as exc:  # noqa: BLE001
+        log.error("pypdf import xatosi: %s", exc)
+        return ""
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        parts: list[str] = []
+        for page in reader.pages:
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001
+                continue
+        return "\n".join(parts)
+    except Exception as exc:  # noqa: BLE001
+        log.error("PDF o'qishda xato: %s", exc)
+        return ""
+
+
+def parse_pdf_questions(text: str) -> list[dict]:
+    """PDF matnidan savollarni ajratadi.
+
+    Formatlar:
+      * Test (MC):  ``1) Savol`` + ``A) variant`` ``B) variant`` ...
+      * Ochiq:      ``36) Savol`` + ``a) ...`` ``b) ...``  -> kalitlar ``36a``, ``36b``
+    """
+    questions: list[dict] = []
+    cur: dict | None = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m_mc = _MC_OPT_RE.match(line)
+        if m_mc and cur is not None and cur["type"] == "mc":
+            cur["options"].append(m_mc.group(2).strip())
+            continue
+        m_sub = _OPEN_SUB_RE.match(line)
+        if m_sub and cur is not None:
+            if cur["type"] == "mc" and not cur["options"]:
+                cur["type"] = "open"
+            if cur["type"] == "open":
+                letter = m_sub.group(1).lower()
+                questions.append({
+                    "n": cur["n"],
+                    "key": f"{cur['n']}{letter}",
+                    "q": f"{cur['q']} ({letter})",
+                    "options": [],
+                    "type": "open",
+                })
+                continue
+        m_q = _Q_LINE_RE.match(line)
+        if m_q:
+            if cur is not None and cur["type"] == "mc":
+                questions.append(cur)
+            cur = {
+                "n": int(m_q.group(1)),
+                "key": str(int(m_q.group(1))),
+                "q": m_q.group(2).strip(),
+                "options": [],
+                "type": "mc",
+            }
+            continue
+        if cur is not None:
+            if cur["options"]:
+                cur["options"][-1] += " " + line
+            else:
+                cur["q"] += " " + line
+    if cur is not None and cur["type"] == "mc":
+        questions.append(cur)
+    for q in questions:
+        if q["type"] == "mc" and not q["options"]:
+            q["type"] = "open"
+    return questions[: config.PDF_MAX_QUESTIONS]
+
+
+def parse_answer_input(text: str, questions: list[dict]) -> dict[str, str]:
+    """Javob kiritmasini tahlil qiladi (admin kaliti ham, foydalanuvchi javobi ham).
+
+    Qo'llab-quvvatlanadi:
+      * ``abcdba``      — test (MC) javoblari ketma-ketligi
+      * ``36a)2.3``     — ochiq savol javobi (savol raqami + variant harfi)
+      * ``36)2.3``      — ochiq savol javobi (faqat raqam)
+    """
+    answers: dict[str, str] = {}
+    mc_seq = ""
+    for token in re.split(r"[\s,;]+", (text or "").strip()):
+        if not token:
+            continue
+        m = _ANS_TOKEN_RE.match(token)
+        if m:
+            num = int(m.group(1))
+            letter = (m.group(2) or "").lower()
+            answers[f"{num}{letter}"] = m.group(3).strip()
+            continue
+        if re.fullmatch(r"[a-fA-F]+", token):
+            mc_seq += token.lower()
+    mc_questions = [q for q in questions if q.get("type") == "mc"]
+    for i, q in enumerate(mc_questions):
+        if i < len(mc_seq):
+            answers[q["key"]] = mc_seq[i]
+    return answers
+
+
+def check_pdf_answers(user_input: str, test: dict) -> tuple[int, int, list[dict]]:
+    """PDF test javoblarini to'g'ri kalit bilan solishtiradi.
+
+    Qaytaradi: ``(to'g'ri_soni, jami, tafsilotlar)``.
+    """
+    questions = test["questions"]
+    correct_map = test["answers"]
+    parsed = parse_answer_input(user_input, questions)
+
+    detail: list[dict] = []
+    correct_count = 0
+    for q in questions:
+        key = q["key"]
+        u = str(parsed.get(key, "-")).strip()
+        c = str(correct_map.get(key, "")).strip()
+        ok = bool(c) and u.lower() == c.lower()
+        if ok:
+            correct_count += 1
+        detail.append({
+            "key": key, "n": q.get("n"), "q": q.get("q", ""),
+            "user": u, "correct": c, "ok": ok, "type": q.get("type"),
+        })
+    return correct_count, len(questions), detail
+
+
+def format_pdf_result(code: str, title: str, correct: int, total: int,
+                      detail: list[dict]) -> str:
+    pct = round(correct / total * 100) if total else 0
+    if pct >= 80:
+        verdict = "🏆 Ajoyib!"
+    elif pct >= 50:
+        verdict = "👍 Yaxshi!"
+    else:
+        verdict = "📚 Yana mashq qiling."
+
+    lines = [
+        f"🏁 <b>{esc(code)}</b> — {esc(title)}",
+        f"📊 Natija: <b>{correct}/{total}</b> ({pct}%)  {verdict}",
+    ]
+    wrong = [d for d in detail if not d["ok"]]
+    if wrong:
+        lines.append("\n❌ <b>Xatolar:</b>")
+        for d in wrong:
+            lines.append(
+                f"• <b>{esc(d['key'])}</b>. {esc(d['q'])}\n"
+                f"  Siz: <b>{esc(d['user'])}</b> · To'g'ri: <b>{esc(d['correct'])}</b>"
             )
     else:
         lines.append("\n🎉 Barcha javoblar to'g'ri!")
@@ -885,6 +1055,21 @@ async def on_menu_tools(cb: CallbackQuery) -> None:
     await cb.message.edit_text(
         "🧰 *Vositalar*\n\nBo'limni tanlang:",
         reply_markup=tools_kb(),
+    )
+
+
+@dp.callback_query(F.data == "menu:pdftest")
+async def on_menu_pdftest(cb: CallbackQuery) -> None:
+    """PDF testlarni tekshirish: test kodini so'raydi."""
+    await cb.answer()
+    await db.set_user_state(cb.from_user.id, "pdf_answers_code", {})
+    await cb.message.edit_text(
+        "📄 *PDF testlarni tekshirish*\n\n"
+        "Test kodini kiriting:\n\n"
+        "Misol: `12345`",
+        reply_markup=InlineKeyboardBuilder().button(
+            text="⬅️ Orqaga", callback_data="menu:main"
+        ).as_markup(),
     )
 
 
@@ -1326,6 +1511,142 @@ async def handle_test_answers(message: Message, state: dict, text: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Handlers — PDF testlar (qo'shish + tekshirish)
+# --------------------------------------------------------------------------- #
+async def handle_pdf_add(message: Message, state: dict, text: str) -> None:
+    """PDF dan test qo'shishning ko'p qadamli oqimi.
+
+    Qadamlar: file -> code -> title -> answers
+    """
+    user_id = message.from_user.id
+    step = state.get("step", "file")
+
+    if step == "code":
+        code = text.strip()
+        if not code or len(code) > 32 or " " in code:
+            await message.answer(
+                "⚠️ Kod bo'sh joysiz, 32 belgidan qisqa bo'lsin. Qaytadan kiriting:"
+            )
+            return
+        if await db.pdf_test_code_exists(code):
+            await message.answer(
+                f"⚠️ `{code}` kodi allaqachon band. Boshqa kod kiriting:"
+            )
+            return
+        state["code"] = code
+        state["step"] = "title"
+        await db.set_user_state(user_id, "pdf_add", state)
+        await message.answer(
+            "3️⃣ Test sarlavhasini kiriting (masalan: *Matematika 1-chorak testi*)."
+        )
+        return
+
+    if step == "title":
+        state["title"] = text.strip()[:120] or state.get("code", "PDF test")
+        state["step"] = "answers"
+        await db.set_user_state(user_id, "pdf_add", state)
+        qs = state.get("questions", [])
+        mc = [q for q in qs if q.get("type") == "mc"]
+        op = [q for q in qs if q.get("type") == "open"]
+        await message.answer(
+            "4️⃣ Endi *to'g'ri javoblarni* kiriting.\n\n"
+            f"📊 Savollar: *{len(qs)}* ta (test: {len(mc)}, ochiq: {len(op)})\n\n"
+            "Formatlar:\n"
+            "• Test savollari — harflar ketma-ketligi: `abcdba`\n"
+            "• Ochiq savollar — `36a)2.3` yoki `36)2.3`\n\n"
+            "Ikkalasini birga yuborish mumkin:\n"
+            "`abcdba 36a)2.3 36b)4.5`"
+        )
+        return
+
+    if step == "answers":
+        questions = state.get("questions", [])
+        answers = parse_answer_input(text, questions)
+        if not answers:
+            await message.answer(
+                "⚠️ Javoblarni tushunmadim. Test uchun `abcdba`, ochiq uchun "
+                "`36a)2.3` ko'rinishida yuboring."
+            )
+            return
+        code = state.get("code", "")
+        title = state.get("title", code)
+        await db.add_pdf_test(
+            code, title, questions, answers,
+            subject=state.get("subject", "umumiy"),
+            source_file=state.get("source_file", ""),
+            created_by=user_id,
+        )
+        await db.clear_user_state(user_id)
+        await message.answer(
+            f"✅ *PDF test bazaga qo'shildi!*\n\n"
+            f"🔑 Kod: `{code}`\n📄 {esc(title)}\n"
+            f"❓ Savollar: {len(questions)} ta\n"
+            f"🔖 Javoblar: {len(answers)} ta\n\n"
+            "Endi asosiy menyudagi «📄 PDF testlarni tekshirish» orqali "
+            f"`{code}` kodini kiritib testni boshlash mumkin.",
+            reply_markup=qadd_type_kb(),
+        )
+        return
+
+
+async def handle_pdf_answers_code(message: Message, text: str) -> None:
+    """Foydalanuvchi kiritgan test kodini tekshiradi va javob oynasini chiqaradi."""
+    user_id = message.from_user.id
+    code = text.strip()
+    test = await db.get_pdf_test_by_code(code)
+    if not test:
+        await message.answer(
+            f"⚠️ `{code}` kodi topilmadi. Kodni to'g'ri kiriting yoki "
+            "«⬅️ Orqaga» orqali menyuga qayting."
+        )
+        return
+
+    qs = test["questions"]
+    lines = [f"📄 *{esc(test['code'])}* — {esc(test['title'])}\n"]
+    for q in qs:
+        if q.get("type") == "mc":
+            lines.append(f"*{q['n']}.* {esc(q['q'])}")
+            for j, opt in enumerate(q.get("options", [])):
+                lines.append(f"   {chr(65 + j)}) {esc(opt)}")
+        else:
+            lines.append(f"*{q['key']}.* {esc(q['q'])}")
+        lines.append("")
+    mc = [q for q in qs if q.get("type") == "mc"]
+    op = [q for q in qs if q.get("type") == "open"]
+    lines.append("📝 *Javoblaringizni yuboring:*")
+    if mc:
+        lines.append(f"• Test savollari ({len(mc)} ta) — `{('a' * len(mc))}` ko'rinishida")
+    if op:
+        lines.append("• Ochiq savollar — `36a)2.3` ko'rinishida")
+    lines.append("\nMisol: `abcdba 36a)2.3`")
+
+    await db.set_user_state(user_id, "pdf_answers_input", {"code": test["code"]})
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+async def handle_pdf_answers_input(message: Message, state: dict, text: str) -> None:
+    """Foydalanuvchi javoblarini tekshiradi va xatolarni ko'rsatadi."""
+    user_id = message.from_user.id
+    code = state["code"]
+    test = await db.get_pdf_test_by_code(code)
+    if not test:
+        await db.clear_user_state(user_id)
+        await message.answer("⚠️ Test topilmadi.")
+        return
+
+    correct, total, detail = check_pdf_answers(text, test)
+    await db.record_submission(
+        user_id, code, test.get("subject", "umumiy"),
+        text.strip(), correct, total, detail,
+    )
+    await db.bump("quizzes_taken")
+    await db.clear_user_state(user_id)
+
+    result = format_pdf_result(code, test["title"], correct, total, detail)
+    await message.answer(result, parse_mode="HTML")
+
+
+# --------------------------------------------------------------------------- #
 # Handlers — Vositalar (v4: faqat 2 ta — Savol qo'shish, Kanalga ulash)
 # --------------------------------------------------------------------------- #
 @dp.callback_query(F.data == "tools:addq")
@@ -1399,6 +1720,15 @@ async def on_qadd_type(cb: CallbackQuery) -> None:
             f"➕ *{name} — test qo'shish*\n\n"
             "1️⃣ Test sarlavhasini yuboring (masalan: *Algebra asoslari*).\n\n"
             "ℹ️ Test admin tasdiqlagach bazaga qo'shiladi va unikal kod oladi."
+        )
+    elif kind == "pdf":
+        await db.set_user_state(cb.from_user.id, "pdf_add", {"step": "file"})
+        await cb.message.edit_text(
+            "📄 *PDF dan test qo'shish*\n\n"
+            "1️⃣ PDF faylni yuboring (matematika yoki ixtiyoriy sohadan).\n\n"
+            "ℹ️ PDF dan savollar avtomatik ajratib olinadi. Keyin test kodini, "
+            "sarlavhani va to'g'ri javoblarni kiritasiz.\n\n"
+            "📌 Ochiq savollar formati: `36a)2.3` (savol raqami + variant harfi + javob)."
         )
 
 
@@ -1864,8 +2194,82 @@ async def on_lang_choice(cb: CallbackQuery) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Handlers — ovoz, rasm, erkin matn
+# Handlers — ovoz, rasm, PDF, erkin matn
 # --------------------------------------------------------------------------- #
+@dp.message(F.document)
+async def on_document(message: Message) -> None:
+    """PDF faylni qabul qilib, undan test qo'shadi (admin yoki ruxsat olgan)."""
+    u = message.from_user
+    if not u:
+        return
+    await db.upsert_user(u.id, u.username, u.first_name)
+
+    doc = message.document
+    fname = (doc.file_name or "").lower()
+    if not fname.endswith(".pdf"):
+        await message.answer("⚠️ Faqat *PDF* fayl qabul qilinadi.")
+        return
+
+    state = await db.get_user_state(u.id)
+    if not state or state["state"] != "pdf_add":
+        await message.answer(
+            "ℹ️ PDF dan test qo'shish uchun: «🧰 Vositalar → ➕ Savol qo'shish → "
+            "📄 PDF dan test» ni tanlang."
+        )
+        return
+
+    if not config.is_admin(u.id, u.username):
+        await message.answer("🔒 PDF dan test qo'shish faqat admin uchun.")
+        return
+
+    size_mb = (doc.file_size or 0) / (1024 * 1024)
+    if size_mb > config.PDF_MAX_MB:
+        await message.answer(
+            f"⚠️ Fayl juda katta ({size_mb:.1f} MB). Maksimal: {config.PDF_MAX_MB} MB."
+        )
+        return
+
+    await _typing(message)
+    try:
+        file = await bot.get_file(doc.file_id)
+        buf = await bot.download_file(file.file_path)
+        data = buf.read()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("PDF yuklab olishda xato: %s", exc)
+        await message.answer("⚠️ PDF faylni yuklab bo'lmadi.")
+        return
+
+    text = extract_pdf_text(data)
+    if not text.strip():
+        await message.answer(
+            "⚠️ PDF dan matn ajratib bo'lmadi (skanerlangan rasm bo'lishi mumkin). "
+            "Boshqa PDF yuboring."
+        )
+        return
+
+    questions = parse_pdf_questions(text)
+    if not questions:
+        await message.answer(
+            "⚠️ PDF da savollar topilmadi. Savollar `1) ...` ko'rinishida "
+            "bo'lishi kerak."
+        )
+        return
+
+    mc = [q for q in questions if q.get("type") == "mc"]
+    op = [q for q in questions if q.get("type") == "open"]
+    state["questions"] = questions
+    state["source_file"] = doc.file_name or ""
+    state["step"] = "code"
+    await db.set_user_state(u.id, "pdf_add", state)
+
+    await message.answer(
+        f"✅ PDF o'qildi: *{len(questions)}* ta savol topildi "
+        f"(test: {len(mc)}, ochiq: {len(op)}).\n\n"
+        "2️⃣ Endi test uchun *kod* kiriting (masalan: `12345`).\n\n"
+        "ℹ️ Bu kodni foydalanuvchilar testni topish uchun ishlatadi."
+    )
+
+
 @dp.message(F.voice)
 async def on_voice(message: Message) -> None:
     u = message.from_user
@@ -2023,11 +2427,27 @@ async def on_text(message: Message) -> None:
         if st == "qadd_writing":
             await handle_qadd_writing(message, state["data"], text)
             return
+        if st == "pdf_add":
+            await handle_pdf_add(message, state["data"], text)
+            return
+        if st == "pdf_answers_code":
+            await handle_pdf_answers_code(message, text)
+            return
+        if st == "pdf_answers_input":
+            await handle_pdf_answers_input(message, state["data"], text)
+            return
 
     # 1) Test kodi (MATH-0001 / PHY-0001)
     if _TEST_CODE_RE.match(text.strip()):
         await handle_test_code(message, text.strip().upper())
         return
+
+    # 1b) PDF test kodi (masalan '12345') — mavjud bo'lsa javob oynasini chiqaramiz
+    if re.fullmatch(r"[A-Za-z0-9_-]{2,32}", text.strip()):
+        pdf_test = await db.get_pdf_test_by_code(text.strip())
+        if pdf_test:
+            await handle_pdf_answers_code(message, text.strip())
+            return
 
     # 2) Faol test bo'lsa — tugmalardan foydalanishni eslatamiz
     sess = await db.get_quiz_session(u.id)
