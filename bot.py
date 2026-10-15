@@ -386,7 +386,7 @@ def main_reply_kb() -> ReplyKeyboardMarkup:
 
 
 # --- Test tugagach: kontakt ulashish (2-talab) ---
-CONTACT_BTN = "📱 Telefon raqamim"
+CONTACT_BTN = "📞 Raqamimni qoldirish"
 CONTACT_RE = re.compile(r"kontakt|aloqa|bog['’]lanish", re.IGNORECASE)
 
 
@@ -402,10 +402,11 @@ def contact_reply_kb() -> ReplyKeyboardMarkup:
 def contact_ask_text(title: str) -> str:
     """Test nomi bilan birga kontakt so'raydigan matn."""
     return (
-        f"📄 *{esc(title)}*\n\n"
-        "📱 *Bog'lanish uchun kontaktingizni ulashishni xohlaysizmi?*\n"
-        "Quyidagi «📱 Telefon raqamim» tugmasini bosing yoki telefon "
-        "raqamingizni yozib yuboring — mutaxassis siz bilan bog'lanadi."
+        f"📄 *{esc(title)}* — test yakunlandi ✅\n\n"
+        "📞 *Natijangizni saqlab qolish va siz bilan bog'lanish uchun "
+        "raqamingizni qoldiring.*\n"
+        "Pastdagi «📞 Raqamimni qoldirish» tugmasini bosing yoki raqamingizni "
+        "shu yerga yozib yuboring — mutaxassisimiz tez orada aloqaga chiqadi."
     )
 
 
@@ -1593,15 +1594,15 @@ async def _save_contact_and_ack(message: Message, phone: str, name: str = "") ->
         log.exception("Kontaktni saqlashda xato (user=%s)", u.id)
     await db.clear_user_state(u.id)
     await _ans(message,
-        "✅ *Rahmat!* Kontaktingiz qabul qilindi.\n\n"
-        "Mutaxassis tez orada siz bilan bog'lanadi.",
+        "✅ *Rahmat!* Raqamingiz qabul qilindi.\n\n"
+        "Mutaxassisimiz tez orada siz bilan bog'lanadi.",
         reply_markup=main_reply_kb(),
     )
 
 
 @dp.message(F.contact)
 async def on_contact(message: Message) -> None:
-    """📱 «Kontakt ulashish» tugmasi bosilganda ishlaydi (2-talab)."""
+    """📞 «Raqamimni qoldirish» tugmasi bosilganda ishlaydi (2-talab)."""
     c = message.contact
     if c is None:
         return
@@ -1621,7 +1622,7 @@ async def handle_contact_text(message: Message, text: str) -> bool:
         return True
     # Kontakt emas — holatni tozalab, odatdagi oqimga qaytaramiz
     await message.answer(
-        "📱 Telefon raqamingizni yuboring yoki «📱 Kontakt ulashish» "
+        "📞 Iltimos, raqamingizni yuboring yoki «📞 Raqamimni qoldirish» "
         "tugmasini bosing.",
         reply_markup=contact_reply_kb(),
     )
