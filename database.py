@@ -364,6 +364,24 @@ class Database:
         await self.db.execute("DELETE FROM chat_history WHERE user_id = ?", (user_id,))
         await self.db.commit()
 
+    async def get_context_history(
+        self, user_id: int, limit: int = 6
+    ) -> list[dict[str, Any]]:
+        """AI konteksti uchun oxirgi `limit` ta qatlamni XRONOLOGIK tartibda
+        (eng eskisi birinchi) qaytaradi. Faqat 'user' va 'assistant' rollari.
+        """
+        cur = await self.db.execute(
+            """
+            SELECT role, text FROM chat_history
+            WHERE user_id = ? AND role IN ('user', 'assistant')
+            ORDER BY id DESC LIMIT ?
+            """,
+            (user_id, max(0, int(limit))),
+        )
+        rows = await cur.fetchall()
+        # DESC bilan olingan -> teskari aylantirib xronologik tartibga keltiramiz
+        return [dict(r) for r in reversed(rows)]
+
     # ------------------------------------------------------------------ #
     # Tezkor javoblar
     # ------------------------------------------------------------------ #

@@ -109,6 +109,7 @@ class GeminiPool:
         prompt: str,
         *,
         system_instruction: Optional[str] = None,
+        history: Optional[list[dict[str, Any]]] = None,
         image_bytes: Optional[bytes] = None,
         image_mime: str = "image/jpeg",
         temperature: float = 0.8,
@@ -116,9 +117,23 @@ class GeminiPool:
     ) -> str:
         """Matn (yoki matn+rasm) so'rovi.
 
+        `history` — oldingi suhbat qatlamlari: [{"role": "user"|"assistant",
+        "text": "..."}]. Ular Gemini'ning ko'p bosqichli `contents` maydoniga
+        qo'shiladi, shunda model oldingi gaplarni eslab qoladi.
+
         Avval har bir model uchun barcha kalitlar sinaladi; model ishlamasa
         (404/429/503), keyingi modelga o'tiladi.
         """
+        contents: list[dict[str, Any]] = []
+        if history:
+            for turn in history:
+                t = str(turn.get("text") or "").strip()
+                if not t:
+                    continue
+                # Gemini rollari: "user" va "model" (assistant -> model).
+                role = "model" if turn.get("role") in ("assistant", "model") else "user"
+                contents.append({"role": role, "parts": [{"text": t[:4000]}]})
+
         parts: list[dict[str, Any]] = [{"text": prompt}]
         if image_bytes:
             parts.append(
@@ -129,9 +144,10 @@ class GeminiPool:
                     }
                 }
             )
+        contents.append({"role": "user", "parts": parts})
 
         payload: dict[str, Any] = {
-            "contents": [{"role": "user", "parts": parts}],
+            "contents": contents,
             "generationConfig": {
                 "temperature": temperature,
                 "maxOutputTokens": max_output_tokens,

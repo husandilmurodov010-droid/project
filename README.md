@@ -57,6 +57,21 @@ adabiyot, umumiy bilim.
 Bot sohani **avtomatik aniqlaydi** (kalit so'z + arifmetik ifoda tahlili) va
 Gemini orqali mos tarzda javob beradi.
 
+### 🧠 Suhbat xotirasi (conversation memory)
+Bot **oldingi gaplarni eslab qoladi** — har bir yangi javob oldingi suhbatga
+bog'lanadi. Har bir foydalanuvchi uchun oxirgi `HISTORY_CONTEXT_SIZE` (default
+**6**) ta qatlam (foydalanuvchi xabari + bot javobi) `chat_history` jadvalida
+saqlanadi va Gemini so'roviga **ko'p bosqichli `contents`** sifatida uzatiladi
+(`role: user` / `role: model`).
+
+Natijada:
+- «tahlil qil», «davom et», «shuni ishlab ber», «yana» kabi so'rovlar **oldingi
+  mavzuga tayanadi** — bot yangidan boshlamaydi va allaqachon berilgan misolni
+  qaytadan so'ramaydi.
+- Ovozli xabar va rasm tahlili ham suhbat kontekstiga bog'lanadi.
+- Yangi suhbat boshlash uchun: **🔄 Suhbatni tozalash** tugmasi yoki `/reset`
+  buyrug'i (tarix tozalanadi, bot oldingi gaplarni unutadi).
+
 ### 🔑 5 ta Gemini kalit — round-robin + failover
 - **Round-robin:** har bir so'rov navbatdagi kalitdan boshlanadi
 - **Failover:** kalit 429/5xx bersa → avtomatik keyingisiga o'tadi
@@ -157,6 +172,7 @@ Asosiy menyuda **«📄 PDF testlarni tekshirish»** tugmasi bor:
 | `/quiz` | Soha bo'yicha test o'tash |
 | `/stats` | Statistika (foydalanuvchilar, so'rovlar, sohalar) |
 | `/history` | Oxirgi suhbatlar tarixi |
+| `/reset` | Suhbatni tozalash (yangi suhbat — kontekstni unutadi) |
 | `/clearhistory` | Suhbat tarixini tozalash |
 | `/lang` | Til tanlash (uz / en / ru) |
 | `/bank [so'z]` | Savollar banki |

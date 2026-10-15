@@ -116,6 +116,13 @@ SYSTEM_PROMPT = (
     "Foydalanuvchi qaysi tilda yozsa, o'sha tilda javob ber (odatda o'zbek tili). "
     "Sohalarni qamrab olasan: matematika, fizika, tarix, ingliz tili, dasturlash, "
     "tibbiyot, biznes, fan, geografiya, adabiyot, manga/anime, umumiy bilim va boshqalar. "
+    "MUHIM — SUHBAT XOTIRASI: senga oldingi suhbat qatlamlari (foydalanuvchi va sen "
+    "yozgan xabarlar) beriladi. Har bir yangi javobni OLDINGI gaplarga bog'lab ber. "
+    "Agar foydalanuvchi 'tahlil qil', 'davom et', 'shuni ishlab ber', 'yana', "
+    "'tushuntir' kabi so'rov yozsa — bu oldingi mavzuga ishora; yangidan boshlamang "
+    "va allaqachon berilgan misolni qaytadan so'ramang. Oldingi javobingda misol "
+    "bergan bo'lsang, endi o'sha misolga tayanib davom et. Faqat foydalanuvchi aniq "
+    "yangi mavzu boshlasa yoki 'reset' qilsa, kontekstni tashlab yangidan boshlaysan. "
     "Javoblaring aniq, qisqa va foydali bo'lsin; kerak bo'lsa misol va qadamlar bilan "
     "tushuntir. Ma'lumot ishonchsiz bo'lsa, buni ochiq ayt. Javobni chiroyli, "
     "o'qishga qulay formatda yoz."
@@ -296,8 +303,8 @@ async def _safe_send(message: Message, text: str) -> None:
             await message.answer(chunk, parse_mode=None)
 
 
-async def _ask_gemini(message: Message, prompt: str, **kwargs) -> None:
-    """Gemini'ga so'rov yuborib, javobni xavfsiz yuboradi."""
+async def _ask_gemini(message: Message, prompt: str, **kwargs) -> str | None:
+    """Gemini'ga so'rov yuborib, javobni xavfsiz yuboradi va matnini qaytaradi."""
     await _typing(message)
     try:
         answer = await pool.generate(prompt, system_instruction=SYSTEM_PROMPT, **kwargs)
@@ -306,13 +313,14 @@ async def _ask_gemini(message: Message, prompt: str, **kwargs) -> None:
         await message.answer(
             "⚠️ Hozircha AI xizmatiga ulanib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
         )
-        return
+        return None
     except Exception as exc:  # noqa: BLE001
         log.exception("Kutilmagan xato: %s", exc)
         await message.answer("⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
-        return
+        return None
 
     await _safe_send(message, answer)
+    return answer
 
 
 async def _ask_gemini_custom(
@@ -352,7 +360,8 @@ def main_menu_kb():
     kb.button(text="🧰 Vositalar", callback_data="menu:tools")
     kb.button(text="📄 PDF testlarni tekshirish", callback_data="menu:pdftest")
     kb.button(text="🎯 Testlar (umumiy)", callback_data="menu:quiz")
-    kb.adjust(2, 2, 1, 1, 1)
+    kb.button(text="🔄 Suhbatni tozalash", callback_data="menu:reset")
+    kb.adjust(2, 2, 1, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -807,10 +816,14 @@ async def cmd_help(message: Message) -> None:
         "`/quiz` — soha bo'yicha test\n"
         "`/stats` — statistika\n"
         "`/history` — suhbat tarixi\n"
+        "`/reset` — suhbatni tozalash (yangi suhbat)\n"
         "`/lang` — til (uz/en/ru)\n"
         "`/bank [so'z]` — savollar banki\n"
         "`/manga Naruto` — manga haqida\n"
         "`/image <tavsif>` — rasm yaratish\n\n"
+        "🧠 *Suhbat xotirasi:* bot oldingi gaplaringizni eslab qoladi. "
+        "«tahlil qil», «davom et», «shuni ishlab ber» kabi so'rovlar oldingi "
+        "mavzuga tayanadi. Yangidan boshlash uchun: /reset\n\n"
         "📢 *Kanal boshqaruvi (admin):*\n"
         "🧰 Vositalar → 📢 Kanalga ulash → kanal ulash, post joylash, "
         "post rejalashtirish.\n\n"
@@ -918,6 +931,20 @@ async def cmd_clear_history(message: Message) -> None:
     await message.answer("🗑 Suhbat tarixi tozalandi.")
 
 
+@dp.message(Command("reset"))
+async def cmd_reset(message: Message) -> None:
+    """Suhbatni tozalab, yangi suhbat boshlaydi (kontekstni unutadi)."""
+    u = message.from_user
+    if not u:
+        return
+    await db.clear_history(u.id)
+    await message.answer(
+        "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
+        "gaplarni eslab qolmaydi.",
+        reply_markup=main_menu_kb(),
+    )
+
+
 @dp.message(Command("lang"))
 async def cmd_lang(message: Message) -> None:
     u = message.from_user
@@ -1011,6 +1038,24 @@ async def on_menu_main(cb: CallbackQuery) -> None:
                                    reply_markup=main_menu_kb())
     except Exception:  # noqa: BLE001
         await cb.message.answer("🏠 *Asosiy menyu*:", reply_markup=main_menu_kb())
+
+
+@dp.callback_query(F.data == "menu:reset")
+async def on_menu_reset(cb: CallbackQuery) -> None:
+    """Suhbat tarixini tozalab, yangi suhbat boshlaydi."""
+    await cb.answer("Suhbat tozalandi")
+    await db.clear_history(cb.from_user.id)
+    try:
+        await cb.message.edit_text(
+            "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
+            "gaplarni eslab qolmaydi.\n\n🏠 *Asosiy menyu* — bo'limni tanlang:",
+            reply_markup=main_menu_kb(),
+        )
+    except Exception:  # noqa: BLE001
+        await cb.message.answer(
+            "🔄 Suhbat tozalandi. Yangi suhbat boshlandi.",
+            reply_markup=main_menu_kb(),
+        )
 
 
 @dp.callback_query(F.data == "menu:speaking")
@@ -2310,7 +2355,7 @@ async def on_voice(message: Message) -> None:
         await db.clear_user_state(u.id)
         return
 
-    # Umumiy ovozli rejim: transkript + javob
+    # Umumiy ovozli rejim: transkript + javob (suhbat konteksti bilan)
     prompt = (
         "Quyidagi ovozli xabarni tingla va matnga o'gir (transkript). "
         "So'ng transkriptdagi savol yoki so'rovga javob ber. "
@@ -2318,8 +2363,10 @@ async def on_voice(message: Message) -> None:
         "🎤 Transkript: <matn>\n\n"
         "💬 Javob: <javob>"
     )
+    context = await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE)
     answer = await _ask_gemini_custom(
-        message, prompt, SYSTEM_PROMPT, image_bytes=data, image_mime="audio/ogg"
+        message, prompt, SYSTEM_PROMPT, image_bytes=data, image_mime="audio/ogg",
+        history=context,
     )
     if answer:
         await db.add_history(u.id, "user", "[ovozli xabar]", source="voice")
@@ -2369,7 +2416,18 @@ async def on_photo(message: Message) -> None:
     if caption:
         prompt += f" Foydalanuvchi so'rovi: {caption}"
 
-    await _ask_gemini(message, prompt, image_bytes=data, image_mime="image/jpeg")
+    # Suhbat konteksti (oldingi gaplar) — rasm tahlili ham kontekstga bog'lansin
+    context = []
+    if u:
+        context = await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE)
+        await db.add_history(
+            u.id, "user", f"[rasm] {caption}".strip(), source="image"
+        )
+    answer = await _ask_gemini(
+        message, prompt, image_bytes=data, image_mime="image/jpeg", history=context
+    )
+    if u and answer:
+        await db.add_history(u.id, "assistant", answer, source="image")
 
 
 @dp.message(F.text, ~F.text.startswith("/"))
@@ -2467,8 +2525,10 @@ async def on_text(message: Message) -> None:
         await _safe_send(message, instant["reply"])
         return
 
-    # 4) AI javob (hamma soha)
+    # 4) AI javob (hamma soha) — suhbat konteksti bilan
     topic = detect_topic(text)
+    # Kontekst: joriy xabardan OLDINGI qatlamlar (xronologik tartibda)
+    context = await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE)
     await db.add_history(u.id, "user", text, topic=topic, source="ai")
     await db.bump("ai_requests")
     if topic:
@@ -2476,7 +2536,9 @@ async def on_text(message: Message) -> None:
 
     await _typing(message)
     try:
-        answer = await pool.generate(text, system_instruction=SYSTEM_PROMPT)
+        answer = await pool.generate(
+            text, system_instruction=SYSTEM_PROMPT, history=context
+        )
     except AllKeysFailedError as exc:
         log.error("Gemini xatosi: %s", exc)
         await message.answer(
