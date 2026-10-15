@@ -206,6 +206,41 @@ IELTS Speaking, IELTS Writing, Matematika, Fizika, Vositalar,
 
 ---
 
+### 🆕 v14 da qo'shildi
+
+#### 1) 🔄 Suhbatni tozalash — faqat shu foydalanuvchi uchun
+«🔄 Suhbatni tozalash» tugmasi (asosiy menyu, pastdagi doimiy panel va
+`/reset`, `/clearhistory` buyruqlari) bosilganda **faqat o'sha foydalanuvchining**
+suhbat tarixi o'chiriladi — boshqa foydalanuvchilarning suhbatiga **hech qanday
+ta'sir qilmaydi**.
+
+Yangi metod: `Database.clear_conversation(user_id)` — `chat_history` (AI xotirasi)
+va `user_states` (joriy holat) ni shu `user_id` bo'yicha tozalaydi
+(barcha `DELETE` lar `WHERE user_id = ?` bilan cheklangan) va o'chirilgan
+qatlamlar sonini qaytaradi. Bot tomonida `_reset_my_conversation(user_id)`
+yordamchisi buni chaqiradi va shu foydalanuvchining navigatsiya tarixini
+(`_nav_stack`) ham tozalaydi. Natijada foydalanuvchi **toza holatdan** boshlaydi —
+bot oldingi gaplarni eslab qolmaydi, ammo boshqalar ishlamaydi.
+
+#### 2) «Bosh menyu» dublikati olib tashlandi
+Ilgari ikkita bir xil ma'noli tugma bor edi: **«⬅️ Bosh menyu»** va
+**«🏠 Asosiy menyu»**. Endi **bittasi** qoldi va **hamma joyda bir xil**:
+
+```
+[ ⬅️ Orqaga ]  [ 🏠 Asosiy menyu ]
+```
+
+- `back_kb()` va `_with_back()` faqat **«🏠 Asosiy menyu»** tugmasini qo'shadi.
+- Bo'limlar ichidagi barcha qattiq yozilgan «⬅️ Bosh menyu» tugmalari olib
+  tashlandi (`speaking_kb`, `writing_kb`, `subject_kb`, `tools_kb`,
+  `qadd_*`, `channel_kb`, `reminders_kb`, `stats_admin_kb`,
+  `testadd_subject_kb`) — ularning vazifasini pastdagi yagona
+  **«⬅️ Orqaga» + «🏠 Asosiy menyu»** juftligi bajaradi.
+- Pastdagi doimiy panel tugmasi ham `BTN_MAIN = "🏠 Asosiy menyu"` — endi
+  hamma joyda bir xil nomlanish.
+
+---
+
 ## 📋 Buyruqlar
 
 | Buyruq | Vazifasi |

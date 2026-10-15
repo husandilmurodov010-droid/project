@@ -37,9 +37,9 @@ async def main() -> None:
 
     kb = botmod.tools_kb()
     buttons = [b.text for row in kb.inline_keyboard for b in row]
-    # Navigatsiya tugmalarini ("Orqaga" / "Bosh menyu") hisobga olmaymiz
+    # Navigatsiya tugmalarini ("Orqaga" / "Asosiy menyu") hisobga olmaymiz
     action_buttons = [
-        b for b in buttons if "Orqaga" not in b and "Bosh menyu" not in b
+        b for b in buttons if "Orqaga" not in b and "menyu" not in b.lower()
     ]
     check("Tools'da 2 ta amal tugmasi", len(action_buttons) == 2,
           f"(topildi: {action_buttons})")

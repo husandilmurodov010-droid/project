@@ -378,6 +378,24 @@ class Database:
         await self.db.execute("DELETE FROM chat_history WHERE user_id = ?", (user_id,))
         await self.db.commit()
 
+    async def clear_conversation(self, user_id: int) -> int:
+        """FAQAT shu foydalanuvchining suhbat kontekstini to'liq o'chiradi.
+
+        `chat_history` (AI xotirasi) va `user_states` (joriy holat) shu
+        foydalanuvchi uchun tozalanadi. Boshqa foydalanuvchilarga tegmaydi
+        (barcha DELETE'lar `WHERE user_id = ?` bilan cheklangan).
+        O'chirilgan suhbat qatlamlari sonini qaytaradi.
+        """
+        cur = await self.db.execute(
+            "SELECT COUNT(*) AS c FROM chat_history WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        n = int(row["c"]) if row and row["c"] is not None else 0
+        await self.db.execute("DELETE FROM chat_history WHERE user_id = ?", (user_id,))
+        await self.db.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+        await self.db.commit()
+        return n
+
     async def get_context_history(
         self, user_id: int, limit: int = 6
     ) -> list[dict[str, Any]]:

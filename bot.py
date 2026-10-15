@@ -566,7 +566,7 @@ async def sub_gate_outer_middleware(handler, event, data):
 
 
 async def _ans(message: Message, text: str, **kwargs) -> None:
-    """Javob yuboradi va tagiga '⬅️ Bosh menyu' tugmasini qo'shadi."""
+    """Javob yuboradi va tagiga '⬅️ Orqaga' + '🏠 Asosiy menyu' tugmalarini qo'shadi."""
     kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
     await message.answer(text, **kwargs)
 
@@ -576,6 +576,21 @@ async def _edit(cb: CallbackQuery, text: str, **kwargs) -> None:
     _push_nav(cb)
     kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
     await cb.message.edit_text(text, **kwargs)
+
+
+async def _reset_my_conversation(user_id: int) -> int:
+    """FAQAT shu foydalanuvchining suhbat tarixini tozalaydi.
+
+    Boshqa foydalanuvchilarning suhbatiga hech qanday ta'sir qilmaydi:
+    `chat_history` faqat `user_id` bo'yicha o'chiriladi. Shu foydalanuvchining
+    navigatsiya tarixi ham tozalanadi. O'chirilgan qatlamlar sonini qaytaradi.
+    """
+    _nav_stack.pop(user_id, None)
+    try:
+        return await db.clear_conversation(user_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Suhbatni tozalashda xato (user=%s)", user_id)
+        return 0
 
 
 async def _safe_send(message: Message, text: str) -> None:
@@ -680,7 +695,6 @@ def speaking_kb():
     kb.button(text="Part 1 — oddiy savollar", callback_data="sp:part:1")
     kb.button(text="Part 2 — cue card", callback_data="sp:part:2")
     kb.button(text="Part 3 — muhokama", callback_data="sp:part:3")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -689,7 +703,6 @@ def writing_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Task 1 — grafik/xat", callback_data="wr:task:1")
     kb.button(text="Task 2 — insho", callback_data="wr:task:2")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -699,7 +712,6 @@ def subject_kb(subject: str):
     kb.button(text="📝 Misol yechilishi", callback_data=f"sub:{subject}:solve")
     kb.button(text="🎯 Testlar", callback_data=f"sub:{subject}:list")
     kb.button(text="➕ Test qo'shish", callback_data=f"sub:{subject}:add")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -708,7 +720,6 @@ def tools_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Savol qo'shish", callback_data="tools:addq")
     kb.button(text="📢 Kanalga ulash", callback_data="tools:channel")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -720,7 +731,6 @@ def qadd_type_kb():
     kb.button(text="➗ Matematika", callback_data="qadd:type:math")
     kb.button(text="⚛️ Fizika", callback_data="qadd:type:phys")
     kb.button(text="📄 PDF dan test", callback_data="qadd:type:pdf")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
     kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
@@ -730,7 +740,6 @@ def qadd_speaking_part_kb():
     kb.button(text="Part 1", callback_data="qadd:sp:1")
     kb.button(text="Part 2", callback_data="qadd:sp:2")
     kb.button(text="Part 3", callback_data="qadd:sp:3")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:addq")
     kb.adjust(3, 1)
     return kb.as_markup()
 
@@ -739,7 +748,6 @@ def qadd_writing_task_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="Task 1", callback_data="qadd:wr:1")
     kb.button(text="Task 2", callback_data="qadd:wr:2")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:addq")
     kb.adjust(2, 1)
     return kb.as_markup()
 
@@ -750,7 +758,6 @@ def channel_kb():
     kb.button(text="📋 Kanallarim", callback_data="chan:list")
     kb.button(text="✍️ Kanalga post", callback_data="chan:post")
     kb.button(text="🗓 Post rejalashtirish", callback_data="chan:schedule")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -759,7 +766,6 @@ def reminders_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Yangi eslatma", callback_data="tools:rem_new")
     kb.button(text="📋 Mening eslatmalarim", callback_data="tools:rem_list")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -770,7 +776,6 @@ def stats_admin_kb():
     kb.button(text="🏆 Test ishlaganlar", callback_data="stats:testtakers")
     kb.button(text="➕ Kanal qo'shish", callback_data="stats:chanadd")
     kb.button(text="📈 Kanallar statistikasi", callback_data="stats:chanstats")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -780,7 +785,6 @@ def testadd_subject_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➗ Matematika", callback_data="tadd:sub:math")
     kb.button(text="⚛️ Fizika", callback_data="tadd:sub:physics")
-    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(2, 1)
     return kb.as_markup()
 
@@ -1424,7 +1428,7 @@ async def cmd_clear_history(message: Message) -> None:
     u = message.from_user
     if not u:
         return
-    await db.clear_history(u.id)
+    await _reset_my_conversation(u.id)
     await _ans(message, "🗑 Suhbat tarixi tozalandi.")
 
 
@@ -1434,7 +1438,7 @@ async def cmd_reset(message: Message) -> None:
     u = message.from_user
     if not u:
         return
-    await db.clear_history(u.id)
+    await _reset_my_conversation(u.id)
     await _ans(message, 
         "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
         "gaplarni eslab qolmaydi.",
@@ -1482,7 +1486,7 @@ async def on_sub_noaccess(cb: CallbackQuery) -> None:
 async def on_menu_reset(cb: CallbackQuery) -> None:
     """Suhbat tarixini tozalab, yangi suhbat boshlaydi."""
     await cb.answer("Suhbat tozalandi")
-    await db.clear_history(cb.from_user.id)
+    await _reset_my_conversation(cb.from_user.id)
     try:
         await _edit(cb, 
             "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
@@ -1494,6 +1498,9 @@ async def on_menu_reset(cb: CallbackQuery) -> None:
             "🔄 Suhbat tozalandi. Yangi suhbat boshlandi.",
             reply_markup=_menu_kb_for(cb.from_user),
         )
+    # Tozalashdan keyin «⬅️ Orqaga» o'chirilgan ekranga qaytmasligi uchun
+    # navigatsiya tarixini ham tozalaymiz (faqat shu foydalanuvchi uchun).
+    _nav_stack.pop(cb.from_user.id, None)
 
 
 @dp.message(Command("lang"))
@@ -1632,7 +1639,7 @@ async def on_menu_ai(cb: CallbackQuery) -> None:
         "dasturlash, tibbiyot, biznes, fan, geografiya, adabiyot va boshqa har qanday "
         "sohada javob beraman.\n\n"
         "✍️ Savolingizni shu chatga yozing.\n"
-        "🚪 Chiqish uchun «⬅️ Bosh menyu» tugmasini bosing.",
+        "🚪 Chiqish uchun «🏠 Asosiy menyu» tugmasini bosing.",
     )
 
 
@@ -1702,9 +1709,6 @@ async def on_menu_pdftest(cb: CallbackQuery) -> None:
         "📄 *PDF testlarni tekshirish*\n\n"
         "Test kodini kiriting:\n\n"
         "Misol: `12345`",
-        reply_markup=InlineKeyboardBuilder().button(
-            text="⬅️ Bosh menyu", callback_data="menu:main"
-        ).as_markup(),
     )
 
 
@@ -2757,7 +2761,6 @@ async def on_chan_list(cb: CallbackQuery) -> None:
         uname = f" (@{r['username']})" if r["username"] else ""
         lines.append(f"• {esc(r['title'] or r['channel_id'])}{uname}\n  `{r['channel_id']}`")
         kb.button(text=f"🗑 {r['title'] or r['channel_id']}", callback_data=f"chan:del:{r['channel_id']}")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:channel")
     kb.adjust(1)
     await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
@@ -2776,7 +2779,6 @@ async def on_chan_del(cb: CallbackQuery) -> None:
     for r in rows:
         lines.append(f"• {esc(r['title'] or r['channel_id'])} — `{r['channel_id']}`")
         kb.button(text=f"🗑 {r['title'] or r['channel_id']}", callback_data=f"chan:del:{r['channel_id']}")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:channel")
     kb.adjust(1)
     await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
@@ -2795,7 +2797,6 @@ async def _pick_channel(cb: CallbackQuery, action: str) -> None:
     for r in rows:
         kb.button(text=r["title"] or str(r["channel_id"]),
                   callback_data=f"chan:{action}:pick:{r['channel_id']}")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:channel")
     kb.adjust(1)
     await _edit(cb, "📢 Qaysi kanalga?", reply_markup=kb.as_markup())
 
@@ -3010,7 +3011,6 @@ async def on_rem_list(cb: CallbackQuery) -> None:
         dt = datetime.fromtimestamp(r["remind_at"]).strftime("%Y-%m-%d %H:%M")
         lines.append(f"• #{r['id']} — {esc(r['text'])} ({dt})")
         kb.button(text=f"🗑 #{r['id']}", callback_data=f"rem:del:{r['id']}")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:rem")
     kb.adjust(3)
     await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
@@ -3030,7 +3030,6 @@ async def on_rem_del(cb: CallbackQuery) -> None:
         dt = datetime.fromtimestamp(r["remind_at"]).strftime("%Y-%m-%d %H:%M")
         lines.append(f"• #{r['id']} — {esc(r['text'])} ({dt})")
         kb.button(text=f"🗑 #{r['id']}", callback_data=f"rem:del:{r['id']}")
-    kb.button(text="⬅️ Bosh menyu", callback_data="tools:rem")
     kb.adjust(3)
     await _edit(cb, "\n".join(lines), reply_markup=kb.as_markup())
 
@@ -3391,7 +3390,6 @@ async def on_voice(message: Message) -> None:
 def Speaking_redirect_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="🎤 IELTS Speaking", callback_data="menu:speaking")
-    kb.button(text="🏠 Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -3463,7 +3461,6 @@ async def on_photo(message: Message) -> None:
 def Writing_redirect_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="✍️ IELTS Writing", callback_data="menu:writing")
-    kb.button(text="🏠 Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -3498,8 +3495,7 @@ async def on_text(message: Message) -> None:
                    reply_markup=_menu_kb_for(u))
         return
     if text == BTN_RESET:
-        await db.clear_user_state(u.id)
-        await db.clear_history(u.id)
+        await _reset_my_conversation(u.id)
         await _ans(message, 
             "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi.",
             reply_markup=_menu_kb_for(u),
