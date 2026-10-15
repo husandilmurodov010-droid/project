@@ -51,7 +51,10 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -118,6 +121,12 @@ SYSTEM_PROMPT = (
     "Foydalanuvchi qaysi tilda yozsa, o'sha tilda javob ber (odatda o'zbek tili). "
     "Sohalarni qamrab olasan: matematika, fizika, tarix, ingliz tili, dasturlash, "
     "tibbiyot, biznes, fan, geografiya, adabiyot, manga/anime, umumiy bilim va boshqalar. "
+    "MUHIM — SUHBAT XOTIRASI: senga oldingi suhbat qatlamlari (foydalanuvchi va sen "
+    "yozgan xabarlar) beriladi. Har bir yangi javobni OLDINGI gaplarga bog'lab ber. "
+    "Agar foydalanuvchi 'tahlil qil', 'davom et', 'shuni ishlab ber', 'yana', "
+    "'tushuntir' kabi so'rov yozsa — bu oldingi mavzuga ishora; yangidan boshlamang "
+    "va allaqachon berilgan misolni qaytadan so'ramang. Faqat foydalanuvchi aniq "
+    "yangi mavzu boshlasa yoki 'reset' qilsa, kontekstni tashlab yangidan boshlaysan. "
     "Javoblaring aniq, qisqa va foydali bo'lsin; kerak bo'lsa misol va qadamlar bilan "
     "tushuntir. Ma'lumot ishonchsiz bo'lsa, buni ochiq ayt. Javobni chiroyli, "
     "o'qishga qulay formatda yoz."
@@ -156,6 +165,18 @@ WRITING_EXAMINER_PROMPT = (
     "🏆 Umumiy band: X.X\n"
     "❌ Xatolar tahlili: ...\n"
     "✅ Yaxshilangan namuna (qisqa): ..."
+)
+
+WRITING_TASK1_PROMPT = (
+    "Sen tajribali IELTS Writing instruktorsan. Foydalanuvchi Task 1 uchun "
+    "grafik, diagramma, jadval yoki jarayon rasmini yuboradi. Vazifang:\n"
+    "1) Rasmni diqqat bilan tahlil qil: grafik turi (line/bar/pie/table/process/map), "
+    "o'qlar, birliklar, eng yuqori va eng past nuqtalar, umumiy tendentsiya.\n"
+    "2) O'zbek tilida qisqa xulosa yoz: asosiy tendentsiyalar va taqqoslashlar.\n"
+    "3) Foydalanuvchiga shu grafik asosida IELTS Task 1 inshosini yozish uchun "
+    "tuzilma (Introduction / Overview / Body 1 / Body 2) va foydali inglizcha "
+    "iboralar (masalan: 'rose sharply', 'accounted for', 'by contrast') taklif qil.\n"
+    "4) Oxirida namuna Overview paragrafini ingliz tilida yozib ber.",
 )
 
 MATH_SOLVER_PROMPT = (
@@ -317,6 +338,71 @@ def _with_back(markup):
     return markup
 
 
+# --- Pastdagi doimiy panel (reply keyboard) ---
+BTN_START = "🚀 Start"
+BTN_MAIN = "🏠 Asosiy menyu"
+BTN_RESET = "🔄 Suhbatni tozalash"
+BTN_REMIND = "⏰ Eslatma"
+BTN_CHANNEL = "📢 Kanalga ulanish"
+
+
+def main_reply_kb() -> ReplyKeyboardMarkup:
+    """Pastda doimiy turuvchi panel (inline emas — reply keyboard)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_START), KeyboardButton(text=BTN_MAIN)],
+            [KeyboardButton(text=BTN_REMIND), KeyboardButton(text=BTN_RESET)],
+            [KeyboardButton(text=BTN_CHANNEL)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+# --- Majburiy kanal (subscription gate) ---
+def sub_gate_kb() -> InlineKeyboardMarkup:
+    """Kanalga ulanmagan foydalanuvchiga ko'rsatiladigan klaviatura."""
+    kb = InlineKeyboardBuilder()
+    if config.REQUIRED_CHANNEL_URL:
+        kb.button(text="📢 Kanalga ulanish", url=config.REQUIRED_CHANNEL_URL)
+    kb.button(text="✅ Tekshirish", callback_data="sub:check")
+    kb.button(text="🏠 Asosiy menyu", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def is_subscribed(user_id: int) -> bool:
+    """Foydalanuvchi majburiy kanalga ulanganini getChatMember orqali tekshiradi."""
+    if not config.ENABLE_SUB_GATE or not config.REQUIRED_CHANNEL_URL:
+        return True
+    if user_id in config.ADMIN_IDS:
+        return True
+    cid = config.REQUIRED_CHANNEL_ID or config.REQUIRED_CHANNEL_URL
+    try:
+        member = await bot.get_chat_member(chat_id=cid, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001
+        # Tekshirib bo'lmasa (kanal noto'g'ri/yopiq) — foydalanuvchini bloklamaymiz.
+        log.warning("getChatMember xato (%s): %s", cid, exc)
+        return True
+    status = getattr(member, "status", "")
+    s = (status.value if hasattr(status, "value") else str(status)).lower()
+    return s in ("creator", "administrator", "member", "restricted")
+
+
+async def require_sub(cb: CallbackQuery) -> bool:
+    """Bo'limga kirishdan oldin kanal obunasini tekshiradi. False = to'xtatish."""
+    if await is_subscribed(cb.from_user.id):
+        return True
+    await _edit(
+        cb,
+        "🔒 *Davom etishdan oldin kanalga ulanishingiz kerak.*\n\n"
+        f"📢 Kanal: {config.REQUIRED_CHANNEL_URL}\n\n"
+        "Ulangandan so'ng «✅ Tekshirish» tugmasini bosing.",
+        reply_markup=sub_gate_kb(),
+    )
+    return False
+
+
 async def _ans(message: Message, text: str, **kwargs) -> None:
     """Javob yuboradi va tagiga '⬅️ Bosh menyu' tugmasini qo'shadi."""
     kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
@@ -340,9 +426,20 @@ async def _safe_send(message: Message, text: str) -> None:
             await _ans(message, chunk, parse_mode=None)
 
 
-async def _ask_gemini(message: Message, prompt: str, **kwargs) -> None:
-    """Gemini'ga so'rov yuborib, javobni xavfsiz yuboradi."""
+async def _ask_gemini(message: Message, prompt: str, **kwargs) -> str | None:
+    """Gemini'ga so'rov yuborib, javobni xavfsiz yuboradi (xotira bilan).
+    Javob matnini ham qaytaradi.
+    """
     await _typing(message)
+    if "history" not in kwargs:
+        u = message.from_user
+        if u:
+            try:
+                kwargs["history"] = await db.get_context_history(
+                    u.id, limit=config.HISTORY_CONTEXT_SIZE
+                )
+            except Exception:  # noqa: BLE001
+                kwargs["history"] = []
     try:
         answer = await pool.generate(prompt, system_instruction=SYSTEM_PROMPT, **kwargs)
     except AllKeysFailedError as exc:
@@ -350,13 +447,14 @@ async def _ask_gemini(message: Message, prompt: str, **kwargs) -> None:
         await _ans(message, 
             "⚠️ Hozircha AI xizmatiga ulanib bo'lmadi. Birozdan so'ng qayta urinib ko'ring."
         )
-        return
+        return None
     except Exception as exc:  # noqa: BLE001
         log.exception("Kutilmagan xato: %s", exc)
         await _ans(message, "⚠️ Kutilmagan xatolik yuz berdi. Qayta urinib ko'ring.")
-        return
+        return None
 
     await _safe_send(message, answer)
+    return answer
 
 
 async def _ask_gemini_custom(
@@ -397,7 +495,8 @@ def main_menu_kb():
     kb.button(text="🧰 Vositalar", callback_data="menu:tools")
     kb.button(text="📄 PDF testlarni tekshirish", callback_data="menu:pdftest")
     kb.button(text="🎯 Testlar (umumiy)", callback_data="menu:quiz")
-    kb.adjust(1, 2, 2, 1, 1, 1)
+    kb.button(text="🔄 Suhbatni tozalash", callback_data="menu:reset")
+    kb.adjust(1, 2, 2, 1, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -810,6 +909,149 @@ def parse_reminder_time(s: str) -> float | None:
     return None
 
 
+def _apply_day_part(hh: int, part: str | None) -> int:
+    """Kun qismiga qarab 12-soatlik vaqtni 24-soatlikka o'giradi."""
+    if part == "pm" and hh < 12:
+        return hh + 12
+    if part == "am" and hh == 12:
+        return 0
+    return hh
+
+
+_NAT_DAY_RE = re.compile(r"\b(ertaga|etaga|bugun|indinga|indin)\b", re.IGNORECASE)
+_NAT_PM_RE = re.compile(
+    r"\b(kechqurun|kechqurun|kechki|kechasi|kech|tunda|tun)\b", re.IGNORECASE
+)
+_NAT_AM_RE = re.compile(r"\b(ertalab|tongda|tong|saharda)", re.IGNORECASE)
+_NAT_NOON_RE = re.compile(r"\b(tushda|peshin|kunduzi|kunduz)\b", re.IGNORECASE)
+_NAT_STRIP_RE = re.compile(
+    r"\b(ertaga|etaga|bugun|indinga|indin|ertalab|tongda|tong|saharda|kechqurun|"
+    r"kechki|kechasi|kech|tunda|tun|tushda|peshin|kunduzi|kunduz|soat|da|keyin|"
+    r"so['’]?ng|o['’]?tib|menga|iltimos)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_reminder_natural(text: str) -> tuple[str, float] | None:
+    """Tabiiy tildagi eslatmani tahlil qiladi.
+
+    Misollar:
+      "ertaga soat 12 da matematika darsini takrorlash"
+      "30 daqiqadan keyin suv ichish"
+      "bugun kechqurun soat 20 da uchrashuv"
+      "2 soatdan so'ng dori ichish"
+
+    Qaytaradi: (eslatma_matni, timestamp) yoki None (tushunilmasa).
+    """
+    if not text or not text.strip():
+        return None
+    s = text.strip()
+    low = s.lower()
+    now = datetime.now()
+    target = None
+    spans: list[tuple[int, int]] = []
+
+    # Kun siljishi
+    day_offset = 0
+    dm = _NAT_DAY_RE.search(low)
+    if dm:
+        w = dm.group(1)
+        if w in ("ertaga", "etaga"):
+            day_offset = 1
+        elif w in ("indinga", "indin"):
+            day_offset = 2
+
+    # Kun qismi
+    part = None
+    if _NAT_PM_RE.search(low):
+        part = "pm"
+    elif _NAT_AM_RE.search(low):
+        part = "am"
+    elif _NAT_NOON_RE.search(low):
+        part = "pm"
+
+    # 1) Nisbiy: "30 daqiqadan keyin" / "2 soatdan so'ng" / "3 kundan keyin"
+    m = re.search(
+        r"(\d{1,3})\s*(daqiqa|minut|min\w*)\s*(?:dan\s*)?(?:keyin|so['’]?ng|o['’]?tib)",
+        low,
+    )
+    if m:
+        target = now + timedelta(minutes=int(m.group(1)))
+        spans.append(m.span())
+    if target is None:
+        m = re.search(
+            r"(\d{1,3})\s*(soat)\s*(?:dan\s*)?(?:keyin|so['’]?ng|o['’]?tib)", low
+        )
+        if m:
+            target = now + timedelta(hours=int(m.group(1)))
+            spans.append(m.span())
+    if target is None:
+        m = re.search(
+            r"(\d{1,3})\s*(kun)\s*(?:dan\s*)?(?:keyin|so['’]?ng|o['’]?tib)", low
+        )
+        if m:
+            target = now + timedelta(days=int(m.group(1)))
+            spans.append(m.span())
+
+    # 2) Absolyut: "soat 12 da", "soat 18:30 da"
+    if target is None:
+        m = re.search(r"soat\s*(\d{1,2})(?:[:.](\d{2}))?", low)
+        if m:
+            hh = int(m.group(1))
+            mm = int(m.group(2) or 0)
+            hh = _apply_day_part(hh, part)
+            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                base = now + timedelta(days=day_offset)
+                try:
+                    target = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                except ValueError:
+                    target = None
+                if target is not None and target <= now and day_offset == 0:
+                    # Vaqt o'tib ketgan bo'lsa — ertaga
+                    target += timedelta(days=1)
+                if target is not None:
+                    spans.append(m.span())
+
+    if target is None:
+        return None
+
+    # Matnni tozalash: vaqt qismini va kun so'zlarini olib tashlaymiz
+    body = s
+    for a, b in sorted(spans, reverse=True):
+        body = body[:a] + " " + body[b:]
+    body = _NAT_STRIP_RE.sub(" ", body)
+    body = re.sub(r"\s+", " ", body).strip(" ,.-—:;!?")
+    if not body:
+        body = "Eslatma"
+    return body, target.timestamp()
+
+
+_REMINDER_INTENT_RE = re.compile(
+    r"\b(eslat|yodga\s*sol|esda\s*tut|yodda\s*tut|eslatib\s*qo|qilaman|boraman|"
+    r"o['’]?qiyman|uchrashaman|tayyorlanaman|ichaman|yozaman|ko['’]?raman|boshlayman|"
+    r"tugataman|yuboraman|qo['’]?ngiroq\s*qilaman)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_reminder(text: str) -> bool:
+    """Matn tabiiy tildagi eslatmaga o'xshaydimi (vaqt + harakat)."""
+    if not text or len(text) > 250:
+        return False
+    low = text.lower()
+    if not _REMINDER_INTENT_RE.search(low):
+        return False
+    if re.search(r"soat\s*\d", low):
+        return True
+    if re.search(
+        r"\d{1,3}\s*(daqiqa|minut|soat|kun)\w*\s*(?:dan\s*)?(?:keyin|so['’]?ng)", low
+    ):
+        return True
+    if re.search(r"\b(ertaga|indinga|bugun)\b", low) and re.search(r"\d", low):
+        return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Handlers — buyruqlar
 # --------------------------------------------------------------------------- #
@@ -826,6 +1068,12 @@ async def cmd_start(message: Message) -> None:
         "Men *AI Manager* — HAMMA soha bo'yicha AI yordamchingizman.\n\n"
         "Quyidagi bo'limlardan birini tanlang 👇",
         reply_markup=main_menu_kb(),
+    )
+    await _ans(message,
+        "ℹ️ Pastdagi doimiy paneldan ham foydalanishingiz mumkin:\n"
+        f"«{BTN_START}», «{BTN_MAIN}», «{BTN_REMIND}», «{BTN_RESET}», "
+        f"«{BTN_CHANNEL}».",
+        reply_markup=main_reply_kb(),
     )
 
 
@@ -964,6 +1212,73 @@ async def cmd_clear_history(message: Message) -> None:
     await _ans(message, "🗑 Suhbat tarixi tozalandi.")
 
 
+@dp.message(Command("reset"))
+async def cmd_reset(message: Message) -> None:
+    """Suhbatni tozalab, yangi suhbat boshlaydi (kontekstni unutadi)."""
+    u = message.from_user
+    if not u:
+        return
+    await db.clear_history(u.id)
+    await _ans(message, 
+        "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
+        "gaplarni eslab qolmaydi.",
+        reply_markup=main_menu_kb(),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Majburiy kanal — tekshirish / yo'naltirish handlerlari
+# --------------------------------------------------------------------------- #
+@dp.callback_query(F.data == "sub:check")
+async def on_sub_check(cb: CallbackQuery) -> None:
+    """«✅ Tekshirish» — kanal obunasini qayta tekshiradi."""
+    if await is_subscribed(cb.from_user.id):
+        await cb.answer("✅ Ulandingiz!")
+        await _edit(cb, 
+            "✅ *Rahmat!* Kanalga ulandingiz.\n\n"
+            "🏠 *Asosiy menyu* — bo'limni tanlang:",
+            reply_markup=main_menu_kb(),
+        )
+        return
+    await cb.answer("❌ Hali ulanmagansiz", show_alert=True)
+    await _edit(cb, 
+        "❌ *Siz hali kanalga ulanmagansiz.*\n\n"
+        f"📢 Kanal: {config.REQUIRED_CHANNEL_URL}\n\n"
+        "Ulangandan so'ng «✅ Tekshirish» tugmasini qayta bosing.",
+        reply_markup=sub_gate_kb(),
+    )
+
+
+@dp.callback_query(F.data == "sub:noaccess")
+async def on_sub_noaccess(cb: CallbackQuery) -> None:
+    """«Kanalga ulanish» (URL tugmasi ishlamagan holat) uchun matnli yo'riqnoma."""
+    await cb.answer()
+    await _edit(cb, 
+        "📢 *Kanalga ulanish*\n\n"
+        f"Quyidagi havola orqali kanalga ulaning:\n{config.REQUIRED_CHANNEL_URL}\n\n"
+        "So'ng «✅ Tekshirish» tugmasini bosing.",
+        reply_markup=sub_gate_kb(),
+    )
+
+
+@dp.callback_query(F.data == "menu:reset")
+async def on_menu_reset(cb: CallbackQuery) -> None:
+    """Suhbat tarixini tozalab, yangi suhbat boshlaydi."""
+    await cb.answer("Suhbat tozalandi")
+    await db.clear_history(cb.from_user.id)
+    try:
+        await _edit(cb, 
+            "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
+            "gaplarni eslab qolmaydi.\n\n🏠 *Asosiy menyu* — bo'limni tanlang:",
+            reply_markup=main_menu_kb(),
+        )
+    except Exception:  # noqa: BLE001
+        await _ans(cb.message, 
+            "🔄 Suhbat tozalandi. Yangi suhbat boshlandi.",
+            reply_markup=main_menu_kb(),
+        )
+
+
 @dp.message(Command("lang"))
 async def cmd_lang(message: Message) -> None:
     u = message.from_user
@@ -1064,6 +1379,8 @@ async def on_menu_main(cb: CallbackQuery) -> None:
 async def on_menu_ai(cb: CallbackQuery) -> None:
     """AI bilan erkin suhbat rejimi."""
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await db.set_user_state(cb.from_user.id, "ai_chat", {})
     await _edit(
         cb,
@@ -1079,6 +1396,8 @@ async def on_menu_ai(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:speaking")
 async def on_menu_speaking(cb: CallbackQuery) -> None:
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await _edit(cb, 
         "🎤 *IELTS Speaking*\n\nQuestion type ni tanlang:",
         reply_markup=speaking_kb(),
@@ -1088,6 +1407,8 @@ async def on_menu_speaking(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:writing")
 async def on_menu_writing(cb: CallbackQuery) -> None:
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await _edit(cb, 
         "✍️ *IELTS Writing*\n\nTask ni tanlang:",
         reply_markup=writing_kb(),
@@ -1097,6 +1418,8 @@ async def on_menu_writing(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:math")
 async def on_menu_math(cb: CallbackQuery) -> None:
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await _edit(cb, 
         "➗ *Matematika*\n\nBo'limni tanlang:",
         reply_markup=subject_kb("math"),
@@ -1106,6 +1429,8 @@ async def on_menu_math(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:physics")
 async def on_menu_physics(cb: CallbackQuery) -> None:
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await _edit(cb, 
         "⚛️ *Fizika*\n\nBo'limni tanlang:",
         reply_markup=subject_kb("phys"),
@@ -1115,6 +1440,8 @@ async def on_menu_physics(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:tools")
 async def on_menu_tools(cb: CallbackQuery) -> None:
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await _edit(cb, 
         "🧰 *Vositalar*\n\nBo'limni tanlang:",
         reply_markup=tools_kb(),
@@ -1125,6 +1452,8 @@ async def on_menu_tools(cb: CallbackQuery) -> None:
 async def on_menu_pdftest(cb: CallbackQuery) -> None:
     """PDF testlarni tekshirish: test kodini so'raydi."""
     await cb.answer()
+    if not await require_sub(cb):
+        return
     await db.set_user_state(cb.from_user.id, "pdf_answers_code", {})
     await _edit(cb, 
         "📄 *PDF testlarni tekshirish*\n\n"
@@ -1139,6 +1468,8 @@ async def on_menu_pdftest(cb: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:quiz")
 async def on_menu_quiz(cb: CallbackQuery) -> None:
     await cb.answer()
+    if not await require_sub(cb):
+        return
     topics = await db.get_topics()
     if not topics:
         await _ans(cb.message, "⚠️ Test savollari bazasi bo'sh.")
@@ -2100,14 +2431,11 @@ async def on_rem_new(cb: CallbackQuery) -> None:
     await db.set_user_state(cb.from_user.id, "reminder", {})
     await _edit(cb, 
         "⏰ *Yangi eslatma*\n\n"
-        "Birinchi qatorda eslatma matni, ikkinchi qatorda vaqt.\n\n"
-        "Vaqt formatlari:\n"
-        "• `+30m` — 30 daqiqadan so'ng\n"
-        "• `+2h` — 2 soatdan so'ng\n"
-        "• `+1d` — 1 kundan so'ng\n"
-        "• `09:30` — bugun/ertaga 09:30\n"
-        "• `2026-10-20 14:00` — aniq sana va vaqt\n\n"
-        "Misol:\nDarsni takrorlash\n+2h",
+        "Oddiy qilib, bir gapda yozing:\n\n"
+        "📝 _Ertaga soat 12 da matematika darsini takrorlash_\n"
+        "📝 _30 daqiqadan keyin suv ichish_\n"
+        "📝 _Bugun kechqurun soat 20 da uchrashuv_\n\n"
+        "Yoki ikki qatorda: matn, keyin vaqt (`+2h`, `09:30`, `2026-10-20 14:00`).",
         reply_markup=reminders_kb(),
     )
 
@@ -2153,25 +2481,35 @@ async def on_rem_del(cb: CallbackQuery) -> None:
 
 async def handle_reminder(message: Message, text: str) -> None:
     user_id = message.from_user.id
+
+    # 1) Ikki qatorli format: birinchi qatorda matn, ikkinchisida vaqt
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 2:
-        await _ans(message, 
-            "⚠️ Format: birinchi qatorda matn, ikkinchi qatorda vaqt.\n"
-            "Misol:\nDarsni takrorlash\n+2h"
-        )
+    if len(lines) >= 2:
+        ts2 = parse_reminder_time(lines[1])
+        if ts2 is not None:
+            await db.add_reminder(user_id, lines[0], ts2)
+            await db.clear_user_state(user_id)
+            dt = datetime.fromtimestamp(ts2).strftime("%Y-%m-%d %H:%M")
+            await _ans(message, f"✅ Eslatma o'rnatildi!\n\n📌 {esc(lines[0])}\n⏰ {dt}")
+            return
+
+    # 2) Tabiiy til (bitta gap): "ertaga soat 12 da matematika"
+    natural = parse_reminder_natural(text)
+    if natural:
+        body, ts = natural
+        await db.add_reminder(user_id, body, ts)
+        await db.clear_user_state(user_id)
+        dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        await _ans(message, f"✅ Eslatma o'rnatildi!\n\n📌 {esc(body)}\n⏰ {dt}")
         return
-    body = lines[0]
-    ts = parse_reminder_time(lines[1])
-    if not body or ts is None:
-        await _ans(message, 
-            "⚠️ Vaqtni tushunmadim. Formatlar: `+30m`, `+2h`, `+1d`, `09:30`, "
-            "`2026-10-20 14:00`."
-        )
-        return
-    await db.add_reminder(user_id, body, ts)
-    await db.clear_user_state(user_id)
-    dt = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-    await _ans(message, f"✅ Eslatma o'rnatildi!\n\n📌 {esc(body)}\n⏰ {dt}")
+
+    # 3) Tushunmadik — oddiy tilda yo'riqnoma
+    await _ans(message, 
+        "🤔 Vaqtni tushunmadim. Oddiy qilib yozing, masalan:\n\n"
+        "• _Ertaga soat 12 da matematika darsini takrorlash_\n"
+        "• _30 daqiqadan keyin suv ichish_\n"
+        "• _Bugun kechqurun soat 20 da uchrashuv_"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2373,21 +2711,22 @@ async def on_voice(message: Message) -> None:
         await db.clear_user_state(u.id)
         return
 
-    # Umumiy ovozli rejim: transkript + javob
-    prompt = (
-        "Quyidagi ovozli xabarni tingla va matnga o'gir (transkript). "
-        "So'ng transkriptdagi savol yoki so'rovga javob ber. "
-        "Javobni quyidagi formatda yoz:\n"
-        "🎤 Transkript: <matn>\n\n"
-        "💬 Javob: <javob>"
+    # Ovozli rejim FAQAT IELTS Speaking ichida ishlatiladi.
+    # Boshqa joyda ovoz yuborilsa — foydalanuvchini Speaking'ga yo'naltiramiz.
+    await _ans(message, 
+        "🎤 Ovozli javob faqat *IELTS Speaking* bo'limida baholanadi.\n\n"
+        "👇 *IELTS Speaking* → Part tanlang, savolga ovozli xabar yuboring "
+        "— IELTS mezonlari bo'yicha baholayman.",
+        reply_markup=Speaking_redirect_kb(),
     )
-    answer = await _ask_gemini_custom(
-        message, prompt, SYSTEM_PROMPT, image_bytes=data, image_mime="audio/ogg"
-    )
-    if answer:
-        await db.add_history(u.id, "user", "[ovozli xabar]", source="voice")
-        await db.add_history(u.id, "assistant", answer, source="voice")
-        await _safe_send(message, answer)
+
+
+def Speaking_redirect_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎤 IELTS Speaking", callback_data="menu:speaking")
+    kb.button(text="🏠 Bosh menyu", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 @dp.message(F.photo)
@@ -2397,6 +2736,7 @@ async def on_photo(message: Message) -> None:
         await db.upsert_user(u.id, u.username, u.first_name)
 
     # Kanalga rasm post qilish holati
+    state = None
     if u:
         state = await db.get_user_state(u.id)
         if state and state["state"] == "chan_post":
@@ -2425,14 +2765,40 @@ async def on_photo(message: Message) -> None:
         return
 
     caption = (message.caption or "").strip()
-    prompt = (
-        "Bu rasmni tahlil qil: unda nima tasvirlangan, matn bo'lsa o'qib ber, "
-        "uslub, kayfiyat va mazmun haqida gapirib ber."
-    )
-    if caption:
-        prompt += f" Foydalanuvchi so'rovi: {caption}"
 
-    await _ask_gemini(message, prompt, image_bytes=data, image_mime="image/jpeg")
+    # Rasm FAQAT IELTS Writing Task 1 ichida ishlatiladi (grafik/diagramma).
+    if state and state["state"] == "writing" and state["data"].get("task") == 1:
+        prompt = (
+            "Bu grafik/diagramma/rasmni IELTS Writing Task 1 uchun tahlil qil."
+            " Asosiy tendentsiyalar, eng katta/kichik qiymatlar, taqqoslashlar va "
+            "umumiy xulosani aniqla. So'ng foydalanuvchiga shu grafik asosida Task 1 "
+            "inshosini yozish uchun tuzilma va foydali iboralar taklif qil."
+        )
+        if caption:
+            prompt += f" Foydalanuvchi so'rovi: {caption}"
+        answer = await _ask_gemini_custom(
+            message, prompt, WRITING_TASK1_PROMPT, image_bytes=data,
+            image_mime="image/jpeg",
+        )
+        if answer:
+            await _safe_send(message, answer)
+        return
+
+    # Boshqa joyda rasm yuborilsa — Writing Task 1'ga yo'naltiramiz.
+    await _ans(message, 
+        "🖼 Rasm tahlili *IELTS Writing Task 1* bo'limida ishlatiladi "
+        "(grafik/diagramma tahlili).\n\n"
+        "👇 *IELTS Writing* → Task 1 ni tanlab, rasm yuboring.",
+        reply_markup=Writing_redirect_kb(),
+    )
+
+
+def Writing_redirect_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✍️ IELTS Writing", callback_data="menu:writing")
+    kb.button(text="🏠 Bosh menyu", callback_data="menu:main")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 @dp.message(F.text, ~F.text.startswith("/"))
@@ -2447,6 +2813,58 @@ async def on_text(message: Message) -> None:
     await db.upsert_user(u.id, u.username, u.first_name)
     if config.is_admin(u.id, u.username):
         await db.register_admin(u.id)
+
+    # 0) Pastdagi doimiy panel tugmalari (oddiy, tabiiy)
+    if text == BTN_START:
+        await db.clear_user_state(u.id)
+        name = u.first_name or "do'stim"
+        await _ans(message, 
+            f"👋 Xush kelibsiz, *{name}*!\n\nBo'limni tanlang 👇",
+            reply_markup=main_menu_kb(),
+        )
+        await _ans(message, "ℹ️ Doimiy panel pastda qoladi.",
+                   reply_markup=main_reply_kb())
+        return
+    if text == BTN_MAIN:
+        await db.clear_user_state(u.id)
+        await _ans(message, "🏠 *Asosiy menyu* — bo'limni tanlang:",
+                   reply_markup=main_menu_kb())
+        return
+    if text == BTN_RESET:
+        await db.clear_user_state(u.id)
+        await db.clear_history(u.id)
+        await _ans(message, 
+            "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+    if text == BTN_REMIND:
+        await db.set_user_state(u.id, "reminder", {})
+        await _ans(message, 
+            "⏰ *Eslatma*\n\nOddiy qilib yozing — masalan:\n"
+            "`Ertaga soat 12 da matematika darsini takrorlash`",
+            reply_markup=reminders_kb(),
+        )
+        return
+    if text == BTN_CHANNEL:
+        cid = config.DEFAULT_CHANNEL_ID
+        if cid:
+            try:
+                chat = await bot.get_chat(cid)
+                await _ans(message, 
+                    f"📢 *Kanal:* {esc(getattr(chat, 'title', cid))}\n"
+                    f"ID: `{chat.id}`\n\n"
+                    "Bot shu kanalga post joylay oladi.",
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_chat xato: %s", exc)
+        await _ans(message, 
+            "📢 *Kanal boshqaruvi*\n\nKanal ulash, post joylash va "
+            "rejalashtirish uchun:",
+            reply_markup=channel_kb(),
+        )
+        return
 
     # 0) Ko'p qadamli holatlar
     state = await db.get_user_state(u.id)
@@ -2533,6 +2951,16 @@ async def on_text(message: Message) -> None:
         await _safe_send(message, instant["reply"])
         return
 
+    # 3b) Tabiiy tildagi eslatma ("ertaga soat 12 da ...")
+    if looks_like_reminder(text):
+        natural = parse_reminder_natural(text)
+        if natural:
+            body_n, ts_n = natural
+            await db.add_reminder(u.id, body_n, ts_n)
+            dt_n = datetime.fromtimestamp(ts_n).strftime("%Y-%m-%d %H:%M")
+            await _ans(message, f"✅ Eslatma o'rnatildi!\n\n📌 {esc(body_n)}\n⏰ {dt_n}")
+            return
+
     # 4) AI javob (hamma soha)
     topic = detect_topic(text)
     await db.add_history(u.id, "user", text, topic=topic, source="ai")
@@ -2542,7 +2970,10 @@ async def on_text(message: Message) -> None:
 
     await _typing(message)
     try:
-        answer = await pool.generate(text, system_instruction=SYSTEM_PROMPT)
+        answer = await pool.generate(
+            text, system_instruction=SYSTEM_PROMPT,
+            history=await db.get_context_history(u.id, limit=config.HISTORY_CONTEXT_SIZE),
+        )
     except AllKeysFailedError as exc:
         log.error("Gemini xatosi: %s", exc)
         await _ans(message, 

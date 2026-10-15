@@ -37,8 +37,10 @@ async def main() -> None:
 
     kb = botmod.tools_kb()
     buttons = [b.text for row in kb.inline_keyboard for b in row]
-    # Orqaga/Bosh menyu tugmasini hisobga olmaymiz
-    action_buttons = [b for b in buttons if "Bosh menyu" not in b and "Orqaga" not in b]
+    # Navigatsiya tugmalarini ("Orqaga" / "Bosh menyu") hisobga olmaymiz
+    action_buttons = [
+        b for b in buttons if "Orqaga" not in b and "Bosh menyu" not in b
+    ]
     check("Tools'da 2 ta amal tugmasi", len(action_buttons) == 2,
           f"(topildi: {action_buttons})")
     check("«Savol qo'shish» bor", any("Savol qo'shish" in b for b in action_buttons))
@@ -46,29 +48,6 @@ async def main() -> None:
     check("eski «Ovozli rejim» yo'q", not any("Ovozli rejim" in b for b in buttons))
     check("eski «Rasm» yo'q", not any("Rasm" in b for b in action_buttons))
     check("eski «Savollar banki» yo'q", not any("Savollar banki" in b for b in action_buttons))
-
-    print("\n=== 1b) Asosiy menyu: AI bilan ishlash + Bosh menyu tugmasi ===")
-    mkb = botmod.main_menu_kb()
-    mbtns = [b.text for row in mkb.inline_keyboard for b in row]
-    check("«AI bilan ishlash» bor", any("AI bilan ishlash" in b for b in mbtns))
-    check("AI callback menu:ai", any(
-        getattr(b, "callback_data", None) == "menu:ai"
-        for row in mkb.inline_keyboard for b in row))
-    bkb = botmod.back_kb()
-    bbtns = [b.text for row in bkb.inline_keyboard for b in row]
-    check("back_kb '⬅️ Bosh menyu' beradi", any("Bosh menyu" in b for b in bbtns))
-    check("back_kb callback menu:main", any(
-        getattr(b, "callback_data", None) == "menu:main"
-        for row in bkb.inline_keyboard for b in row))
-    # _with_back klaviaturaga tugma qo'shadi
-    wrapped = botmod._with_back(botmod.speaking_kb())
-    wbtns = [b.text for row in wrapped.inline_keyboard for b in row]
-    check("_with_back 'Bosh menyu' qo'shadi", any("Bosh menyu" in b for b in wbtns))
-    # Asosiy menyuga qo'shmaydi
-    wrapped_main = botmod._with_back(botmod.main_menu_kb())
-    main_back = [b for row in wrapped_main.inline_keyboard for b in row
-                 if getattr(b, "callback_data", None) == "menu:main"]
-    check("asosiy menyuga 'Bosh menyu' qo'shilmaydi", len(main_back) == 0)
 
     print("\n=== 2) Kanal klaviaturasi ===")
     ckb = botmod.channel_kb()

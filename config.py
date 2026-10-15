@@ -57,7 +57,8 @@ INSTANT_MAX_LEN = int(os.getenv("INSTANT_MAX_LEN", "60"))
 # --- Test (quiz) ---
 QUIZ_QUESTIONS_PER_SESSION = int(os.getenv("QUIZ_QUESTIONS_PER_SESSION", "5"))
 
-# --- Suhbat tarixi ---
+# --- Suhbat tarixi / xotira ---
+# AI javobida hisobga olinadigan oldingi qatlamlar soni (xotira).
 HISTORY_CONTEXT_SIZE = int(os.getenv("HISTORY_CONTEXT_SIZE", "6"))
 
 # --- Umumiy ---
@@ -89,6 +90,18 @@ ADMIN_PHONE = os.getenv("ADMIN_PHONE", "+998 883800311").strip()
 # Fon vazifasi har necha sekundda tekshiradi.
 REMINDER_CHECK_INTERVAL = int(os.getenv("REMINDER_CHECK_INTERVAL", "30"))
 
+# --- Majburiy kanal (subscription gate) ---
+# Foydalanuvchi bo'limlardan foydalanishdan oldin shu kanalga ulanishi kerak.
+REQUIRED_CHANNEL_URL = os.getenv(
+    "REQUIRED_CHANNEL_URL", "https://t.me/matmilliysertifikat"
+).strip()
+# getChatMember uchun: @username yoki -100... ID.
+REQUIRED_CHANNEL_ID = os.getenv(
+    "REQUIRED_CHANNEL_ID", "@matmilliysertifikat"
+).strip()
+# Gate umuman yoqilgan/o'chirilgani.
+ENABLE_SUB_GATE = os.getenv("ENABLE_SUB_GATE", "true").lower() in ("1", "true", "yes")
+
 # --- Kanal boshqaruvi ---
 # Standart kanal ID (ixtiyoriy). Bo'sh bo'lsa, kanal bot orqali ulanadi.
 DEFAULT_CHANNEL_ID = os.getenv("DEFAULT_CHANNEL_ID", "").strip()
@@ -101,7 +114,7 @@ PDF_MAX_MB = int(os.getenv("PDF_MAX_MB", "20"))
 # PDF dan ajratib olinadigan maksimal savol soni.
 PDF_MAX_QUESTIONS = int(os.getenv("PDF_MAX_QUESTIONS", "200"))
 
-# --- Ovozli rejim ---
+# --- Ovozli rejim (faqat IELTS Speaking ichida ishlatiladi) ---
 # Ovozli xabarlarni matnga o'girish uchun model (Gemini audio input).
 VOICE_MODEL = os.getenv("VOICE_MODEL", "gemini-3.5-flash-lite").strip()
 ENABLE_VOICE = os.getenv("ENABLE_VOICE", "true").lower() in ("1", "true", "yes")

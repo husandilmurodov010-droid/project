@@ -28,26 +28,6 @@ ishlaydigan** qilib sozlangan.
 
 ## ✨ Funksiyalar
 
-### 🏠 Asosiy menyu tuzilmasi (v6'da yangilandi)
-Asosiy menyu ostidagi inline tugmalar:
-
-1. **🤖 AI bilan ishlash** — AI bilan erkin suhbat rejimi (har qanday sohada savol).
-2. **🎤 IELTS Speaking** — Part 1/2/3 savollari + ovozli xabar baholash.
-3. **✍️ IELTS Writing** — Task 1/2 + insho baholash.
-4. **➗ Matematika** — misol yechish + testlar.
-5. **⚛️ Fizika** — misol yechish + testlar.
-6. **🧰 Vositalar** — savol qo'shish, kanal boshqaruvi.
-7. **📄 PDF testlarni tekshirish** — kod kiritib javob tekshirish.
-8. **🎯 Testlar (umumiy)** — soha bo'yicha test.
-
-**⬅️ Bosh menyu tugmasi:** bot bergan **har bir javob** tagida «⬅️ Bosh menyu»
-inline tugmasi bo'ladi — bosilganda foydalanuvchi asosiy menyuga qaytadi va
-joriy holat (state) tozalanadi. Bu barcha bo'limlarga tegishli.
-
-**Savol matnlarida `|` belgisi ishlatilmaydi.** Savollar tabiiy, ko'p qatorli
-matn ko'rinishida kiritiladi (birinchi qatorda savol, keyingi qatorlarda
-variantlar; bloklar bo'sh qator bilan ajratiladi).
-
 ### ⚡ Tezkor javob tizimi (instant reply)
 `salom`, `assalomu alaykum`, `rahmat`, `qalaysan`, `sen kimsan` kabi so'z va
 iboralarga **AI'ga murojaat qilmasdan**, bazadan darhol javob beriladi
@@ -103,9 +83,9 @@ Asosiy menyu ostidagi **«🧰 Vositalar»** bo'limida endi faqat **2 ta tugma**
   kanalda **admin** ekanligi avtomatik tekshiriladi.
 - **📋 Kanallarim** — ulangan kanallar ro'yxati (o'chirish mumkin).
 - **✍️ Kanalga post** — matn yoki rasmni tanlangan kanalga darhol joylash.
-- **🗓 Post rejalashtirish** — birinchi qatorda post matni, ikkinchi qatorda vaqt;
-  takrorlash uchun uchinchi qatorga daqiqalarni yozing (masalan `1440`). Fon
-  vazifasi (`post_loop`) muddati kelgan postlarni avtomatik yuboradi.
+- **🗓 Post rejalashtirish** — `matn | vaqt` formatida postni rejalashtirish;
+  takrorlash uchun `matn | +1d | 1440` (har 1440 daqiqada). Fon vazifasi
+  (`post_loop`) muddati kelgan postlarni avtomatik yuboradi.
 - Kanal ma'lumotlari bazada saqlanadi (`channels`, `scheduled_posts`).
 
 ### 📄 PDF dan test qo'shish (v5'da qo'shildi)
@@ -167,14 +147,74 @@ Asosiy menyuda **«📄 PDF testlarni tekshirish»** tugmasi bor:
 
 ---
 
+### 🆕 v13 da qo'shildi
+
+#### 1) Pastdagi doimiy panel (reply keyboard)
+Inline tugmalardan tashqari, ekranning **pastida doimiy** turuvchi panel (talab
+bo'yicha **inline emas — reply keyboard**):
+
+```
+🚀 Start          🏠 Asosiy menyu
+⏰ Eslatma        🔄 Suhbatni tozalash
+📢 Kanalga ulanish
+```
+
+`/start` bosilganda panel avtomatik chiqadi (`resize_keyboard=True`,
+`is_persistent=True`). Har bir tugma matn sifatida keladi va `on_text`
+handlerida ushlanadi.
+
+#### 2) Majburiy kanal (subscription gate)
+`/start` da IELTS Speaking bo'limlari chiqadi. Foydalanuvchi biror bo'limni
+tanlaganda bot **getChatMember** orqali kanalga ulanganini tekshiradi:
+
+- **Ulangan bo'lsa** → bo'lim ochiladi.
+- **Ulanmagan bo'lsa** → bot: *«🔒 Davom etishdan oldin kanalga ulanishingiz kerak»*
+  deb yozadi, `📢 Kanalga ulanish` havolasi va `✅ Tekshirish` tugmasini beradi.
+  «✅ Tekshirish» bosilganda `getChatMember` qayta ishlaydi va obuna
+  tasdiqlansa bo'lim ochiladi.
+
+Sozlamalar: `REQUIRED_CHANNEL_URL=https://t.me/matmilliysertifikat`,
+`REQUIRED_CHANNEL_ID=@matmilliysertifikat`, `ENABLE_SUB_GATE=true`.
+Adminlar gate'siz o'tadi. Tekshirib bo'lmaydigan holatda (kanal yopiq/noto'g'ri)
+foydalanuvchi bloklanmaydi.
+
+#### 3) Tabiiy tildagi muloqot (eslatmalar)
+Bot oddiy odam kabi, tabiiy tilda yozilgan eslatmani tushunadi:
+
+```
+Ertaga soat 12 da matematika darsini takrorlash
+30 daqiqadan keyin suv ichish
+2 soatdan so'ng dori ichish
+Bugun kechqurun soat 20 da uchrashuv
+```
+
+`parse_reminder_natural()` vaqtni va kun qismini ajratib oladi
+(`ertaga`/`bugun`/`indinga`, `soat 12 da`, `kechqurun` → 20:00,
+`30 daqiqadan keyin`), matnni tozalaydi va eslatma o'rnatadi. Ikki qatorli
+format (`matn` + `+2h`) ham hamon ishlaydi.
+
+#### 4) Suhbat xotirasi (kontekst)
+AI javoblari oldingi gaplarni **eslab qoladi** — har bir so'rovda oxirgi
+`HISTORY_CONTEXT_SIZE` (default 6) qatlam Gemini'ning `contents` maydoniga
+qo'shiladi. "davom et", "tahlil qil", "shuni ishlab ber" kabi so'rovlar oldingi
+mavzuga tayanadi. Yangidan boshlash: **`/reset`** yoki 🖄 Suhbatni tozalash.
+
+#### 5) Asosiy menyu — quizlar va AI
+Asosiy menyuda: **🤖 AI bilan ishlash**, **🎯 Testlar (umumiy)**,
+IELTS Speaking, IELTS Writing, Matematika, Fizika, Vositalar,
+📄 PDF testlarni tekshirish, 🔄 Suhbatni tozalash.
+
+---
+
 ## 📋 Buyruqlar
 
 | Buyruq | Vazifasi |
 |---|---|
-| `/start` | Boshlash va tanishtirish |
+| `/start` | Boshlash va tanishtirish (pastdagi doimiy panel ham chiqadi) |
 | `/menu` | Asosiy menyu (inline tugmalar) |
 | `/help` | Batafsil yordam |
 | `/quiz` | Soha bo'yicha test o'tash |
+| `/reset` | Suhbatni tozalash — bot kontekstni unutadi (yangi suhbat) |
 | `/stats` | Statistika (foydalanuvchilar, so'rovlar, sohalar) |
 | `/history` | Oxirgi suhbatlar tarixi |
 | `/clearhistory` | Suhbat tarixini tozalash |
