@@ -41,7 +41,7 @@ from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramConflictError
@@ -386,46 +386,183 @@ def main_reply_kb() -> ReplyKeyboardMarkup:
 
 # --- Majburiy kanal (subscription gate) ---
 def sub_gate_kb() -> InlineKeyboardMarkup:
-    """Kanalga ulanmagan foydalanuvchiga ko'rsatiladigan klaviatura."""
+    """Obuna bo'lmagan foydalanuvchiga ko'rsatiladigan klaviatura.
+
+    Faqat ikkita tugma: kanalga obuna bo'lish havolasi va tekshirish tugmasi.
+    """
     kb = InlineKeyboardBuilder()
     if config.REQUIRED_CHANNEL_URL:
-        kb.button(text="📢 Kanalga ulanish", url=config.REQUIRED_CHANNEL_URL)
-    kb.button(text="✅ Tekshirish", callback_data="sub:check")
-    kb.button(text="🏠 Asosiy menyu", callback_data="menu:main")
+        kb.button(text="📢 Kanalga obuna bo'lish", url=config.REQUIRED_CHANNEL_URL)
+    kb.button(text="✅ Obunani tekshirish", callback_data="sub:check")
     kb.adjust(1)
     return kb.as_markup()
 
 
-async def is_subscribed(user_id: int) -> bool:
-    """Foydalanuvchi majburiy kanalga ulanganini getChatMember orqali tekshiradi."""
+# Obuna natijasini qisqa muddat keshda saqlaymiz: har bir xabar uchun Telegram
+# API'ga murojaat qilish rate-limit'ga olib kelmasligi uchun.
+_SUB_CACHE: dict[int, tuple[float, bool]] = {}
+_SUB_CACHE_POS_TTL = 180.0  # obuna tasdiqlangan bo'lsa — 3 daqiqa
+_SUB_CACHE_NEG_TTL = 30.0   # obuna yo'q bo'lsa — 30 sekund
+
+
+def gate_text() -> str:
+    """Majburiy obuna haqidagi asosiy xabar matni."""
+    return (
+        "🔒 *Botdan foydalanish uchun kanalga obuna bo'ling*\n\n"
+        f"📢 *Kanal:* {config.REQUIRED_CHANNEL_URL}\n\n"
+        "Obuna bo'lgach, «✅ Obunani tekshirish» tugmasini bosing."
+    )
+
+
+async def is_subscribed(user_id: int, force: bool = False) -> bool:
+    """Foydalanuvchi majburiy kanalga obuna bo'lganini getChatMember orqali tekshiradi.
+
+    force=True — keshni chetlab o'tib, Telegram'dan qayta so'raydi
+    («✅ Obunani tekshirish» tugmasi shunday chaqiradi).
+    """
     if not config.ENABLE_SUB_GATE or not config.REQUIRED_CHANNEL_URL:
         return True
+    # Adminlar tekshiruvsiz o'tadi.
     if user_id in config.ADMIN_IDS:
         return True
+
+    now = time.time()
+    if not force:
+        cached = _SUB_CACHE.get(user_id)
+        if cached is not None:
+            ts, value = cached
+            ttl = _SUB_CACHE_POS_TTL if value else _SUB_CACHE_NEG_TTL
+            if now - ts < ttl:
+                return value
+
     cid = config.REQUIRED_CHANNEL_ID or config.REQUIRED_CHANNEL_URL
     try:
         member = await bot.get_chat_member(chat_id=cid, user_id=user_id)
     except Exception as exc:  # noqa: BLE001
-        # Tekshirib bo'lmasa (kanal noto'g'ri/yopiq) — foydalanuvchini bloklamaymiz.
+        # Tekshirib bo'lmasa (kanal noto'g'ri/yopiq yoki bot admin emas) —
+        # foydalanuvchini bloklamaymiz (fail-open).
         log.warning("getChatMember xato (%s): %s", cid, exc)
         return True
     status = getattr(member, "status", "")
     s = (status.value if hasattr(status, "value") else str(status)).lower()
-    return s in ("creator", "administrator", "member", "restricted")
+    ok = s in ("creator", "administrator", "member", "restricted")
+    _SUB_CACHE[user_id] = (now, ok)
+    return ok
+
+
+async def _gate_send_message(message: Message) -> None:
+    """Obuna bo'lmagan foydalanuvchiga ogohlantirish + tugmalarni yuboradi."""
+    try:
+        await message.answer(gate_text(), reply_markup=sub_gate_kb())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Obuna xabarini yuborib bo'lmadi: %s", exc)
+
+
+async def _gate_reject_callback(cb: CallbackQuery) -> None:
+    """Obuna bo'lmagan foydalanuvchi tugma bosganda: alert + ogohlantirish."""
+    try:
+        await cb.answer("❌ Siz hali kanalga obuna bo'lmagansiz.", show_alert=True)
+    except Exception:  # noqa: BLE001
+        pass
+    for sender in (
+        lambda: cb.message.edit_text(gate_text(), reply_markup=sub_gate_kb()),
+        lambda: cb.message.answer(gate_text(), reply_markup=sub_gate_kb()),
+    ):
+        try:
+            await sender()
+            return
+        except Exception:  # noqa: BLE001
+            continue
+    log.warning("Obuna callback xabarini yuborib bo'lmadi.")
 
 
 async def require_sub(cb: CallbackQuery) -> bool:
     """Bo'limga kirishdan oldin kanal obunasini tekshiradi. False = to'xtatish."""
-    if await is_subscribed(cb.from_user.id):
+    if await is_subscribed(cb.from_user.id, force=True):
         return True
-    await _edit(
-        cb,
-        "🔒 *Davom etishdan oldin kanalga ulanishingiz kerak.*\n\n"
-        f"📢 Kanal: {config.REQUIRED_CHANNEL_URL}\n\n"
-        "Ulangandan so'ng «✅ Tekshirish» tugmasini bosing.",
-        reply_markup=sub_gate_kb(),
-    )
+    await _gate_reject_callback(cb)
     return False
+
+
+# --------------------------------------------------------------------------- #
+# MAJBURIY KANAL — GLOBAL FILTR (barcha bo'limlarga tegishli)
+# --------------------------------------------------------------------------- #
+# Obuna bo'lmagan foydalanuvchi uchun ruxsat etilgan yagona tugmalar:
+_GATE_ALLOWED_EXACT = {"sub:check", "sub:noaccess"}
+# Kanal egasi tasdiqlash tugmalari (kanal ulash oqimi buzilmasligi uchun).
+_GATE_ALLOWED_PREFIX = ("admin:chan:",)
+# Matnli buyruqlar: /start o'tadi — handler o'zi obuna xabarini beradi va
+# foydalanuvchini bazaga yozadi. Qolgan hamma narsa bloklanadi.
+_GATE_ALLOWED_COMMANDS = {"/start"}
+_GATE_INNER_EVENTS = (
+    "message",
+    "edited_message",
+    "callback_query",
+    "channel_post",
+    "edited_channel_post",
+    "my_chat_member",
+    "chat_member",
+)
+
+
+def _gate_inner(event):
+    """Update ichidan haqiqiy hodisani (message/callback_query/...) ajratadi."""
+    if isinstance(event, (Message, CallbackQuery)):
+        return event
+    for name in _GATE_INNER_EVENTS:
+        obj = getattr(event, name, None)
+        if obj is not None:
+            return obj
+    return None
+
+
+def _gate_allows(event) -> bool:
+    """Obuna bo'lmagan foydalanuvchi uchun ruxsat etilgan hodisami?"""
+    if isinstance(event, CallbackQuery):
+        data = event.data or ""
+        return data in _GATE_ALLOWED_EXACT or data.startswith(_GATE_ALLOWED_PREFIX)
+    if isinstance(event, Message):
+        txt = (event.text or "").strip()
+        if not txt:
+            return False
+        # "/start" yoki "/start@AIManagerProBot"
+        first = txt.split()[0].split("@")[0].lower()
+        return first in _GATE_ALLOWED_COMMANDS
+    return False
+
+
+async def sub_gate_outer_middleware(handler, event, data):
+    """Eng tashqi qatlam: obuna bo'lmagan foydalanuvchini BUTUNLAY to'sadi.
+
+    Bu middleware `dp.update` ga ro'yxatdan o'tadi — ya'ni har qanday
+    yangilanish (matn, buyruq, tugma, fayl, ovoz, rasm) handler'ga yetib
+    borishidan OLDIN ishlaydi. Shu tufayli obuna bo'lmagan foydalanuvchi
+    botning hech bir funksiyasidan foydalana olmaydi.
+    """
+    if not config.ENABLE_SUB_GATE or not config.REQUIRED_CHANNEL_URL:
+        return await handler(event, data)
+
+    inner = _gate_inner(event)
+    user = getattr(inner, "from_user", None) if inner is not None else None
+    if user is None:
+        return await handler(event, data)
+
+    # Adminlar cheklovsiz ishlaydi.
+    if config.is_admin(user.id, getattr(user, "username", None)):
+        return await handler(event, data)
+
+    if await is_subscribed(user.id):
+        return await handler(event, data)
+
+    # --- Obuna bo'lmagan foydalanuvchi ---
+    if _gate_allows(inner):
+        return await handler(event, data)
+
+    if isinstance(inner, CallbackQuery):
+        await _gate_reject_callback(inner)
+    elif isinstance(inner, Message):
+        await _gate_send_message(inner)
+    return None
 
 
 async def _ans(message: Message, text: str, **kwargs) -> None:
@@ -1125,6 +1262,10 @@ async def cmd_start(message: Message) -> None:
         await db.upsert_user(u.id, u.username, u.first_name)
         if config.is_admin(u.id, u.username):
             await db.register_admin(u.id)
+    # Majburiy kanal: /start bosilganda birinchi navbatda obuna so'raladi.
+    if not await is_subscribed(u.id if u else 0, force=True):
+        await message.answer(gate_text(), reply_markup=sub_gate_kb())
+        return
     name = u.first_name if u else "do'stim"
     await _ans(message, 
         f"👋 Salom, *{name}*!\n\n"
@@ -1307,19 +1448,20 @@ async def cmd_reset(message: Message) -> None:
 @dp.callback_query(F.data == "sub:check")
 async def on_sub_check(cb: CallbackQuery) -> None:
     """«✅ Tekshirish» — kanal obunasini qayta tekshiradi."""
-    if await is_subscribed(cb.from_user.id):
-        await cb.answer("✅ Ulandingiz!")
-        await _edit(cb, 
-            "✅ *Rahmat!* Kanalga ulandingiz.\n\n"
+    # force=True — keshni chetlab o'tib, Telegram'dan qayta so'raymiz.
+    if await is_subscribed(cb.from_user.id, force=True):
+        await cb.answer("✅ Obuna tasdiqlandi!")
+        await cb.message.edit_text(
+            "✅ *Rahmat!* Kanalga obuna bo'ldingiz.\n\n"
             "🏠 *Asosiy menyu* — bo'limni tanlang:",
             reply_markup=_menu_kb_for(cb.from_user),
         )
         return
-    await cb.answer("❌ Hali ulanmagansiz", show_alert=True)
-    await _edit(cb, 
-        "❌ *Siz hali kanalga ulanmagansiz.*\n\n"
-        f"📢 Kanal: {config.REQUIRED_CHANNEL_URL}\n\n"
-        "Ulangandan so'ng «✅ Tekshirish» tugmasini qayta bosing.",
+    await cb.answer("❌ Siz hali kanalga obuna bo'lmagansiz.", show_alert=True)
+    await cb.message.edit_text(
+        "❌ *Siz hali kanalga obuna bo'lmagansiz.*\n\n"
+        f"📢 *Kanal:* {config.REQUIRED_CHANNEL_URL}\n\n"
+        "Obuna bo'lgach, «✅ Obunani tekshirish» tugmasini qayta bosing.",
         reply_markup=sub_gate_kb(),
     )
 
@@ -1328,10 +1470,10 @@ async def on_sub_check(cb: CallbackQuery) -> None:
 async def on_sub_noaccess(cb: CallbackQuery) -> None:
     """«Kanalga ulanish» (URL tugmasi ishlamagan holat) uchun matnli yo'riqnoma."""
     await cb.answer()
-    await _edit(cb, 
-        "📢 *Kanalga ulanish*\n\n"
-        f"Quyidagi havola orqali kanalga ulaning:\n{config.REQUIRED_CHANNEL_URL}\n\n"
-        "So'ng «✅ Tekshirish» tugmasini bosing.",
+    await cb.message.edit_text(
+        "📢 *Kanalga obuna bo'lish*\n\n"
+        f"Quyidagi havola orqali kanalga obuna bo'ling:\n{config.REQUIRED_CHANNEL_URL}\n\n"
+        "So'ng «✅ Obunani tekshirish» tugmasini bosing.",
         reply_markup=sub_gate_kb(),
     )
 
@@ -3710,7 +3852,18 @@ async def main() -> None:
         "db": config.DB_PATH,
         **backup_mgr.stats(),
         **watchdog_mgr.stats(),
+        "sub_gate": bool(config.ENABLE_SUB_GATE),
+        "req_channel": config.REQUIRED_CHANNEL_ID or None,
     }
+
+    # Majburiy kanal tekshiruvi — barcha yangilanishlar uchun eng tashqi qatlam.
+    dp.update.outer_middleware(sub_gate_outer_middleware)
+    log.info(
+        "Majburiy kanal tekshiruvi: %s (kanal=%s)",
+        "yoqilgan" if config.ENABLE_SUB_GATE else "o'chirilgan",
+        config.REQUIRED_CHANNEL_ID or "-",
+    )
+
     health_server.state.ready = True
     log.info("Bot tayyor: %s", health_server.state.bot_username or "(noma'lum)")
 
