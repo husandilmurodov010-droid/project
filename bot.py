@@ -55,6 +55,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    ChatMemberUpdated,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -485,7 +486,8 @@ async def get_admin_ids() -> list[int]:
 # --------------------------------------------------------------------------- #
 # Klaviaturalar
 # --------------------------------------------------------------------------- #
-def main_menu_kb():
+def main_menu_kb(is_admin: bool = False):
+    """Asosiy menyu. `📊 Statistika` faqat adminga ko'rinadi."""
     kb = InlineKeyboardBuilder()
     kb.button(text="🤖 AI bilan ishlash", callback_data="menu:ai")
     kb.button(text="🎤 IELTS Speaking", callback_data="menu:speaking")
@@ -496,8 +498,18 @@ def main_menu_kb():
     kb.button(text="📄 PDF testlarni tekshirish", callback_data="menu:pdftest")
     kb.button(text="🎯 Testlar (umumiy)", callback_data="menu:quiz")
     kb.button(text="🔄 Suhbatni tozalash", callback_data="menu:reset")
-    kb.adjust(1, 2, 2, 1, 1, 1, 1)
+    if is_admin:
+        kb.button(text="📊 Statistika", callback_data="menu:stats")
+        kb.adjust(1, 2, 2, 1, 1, 1, 1, 1)
+    else:
+        kb.adjust(1, 2, 2, 1, 1, 1, 1)
     return kb.as_markup()
+
+
+def _menu_kb_for(user) -> object:
+    """Foydalanuvchi admin bo'lsa Statistika tugmasi bilan menyu qaytaradi."""
+    is_admin = bool(user and config.is_admin(user.id, user.username))
+    return main_menu_kb(is_admin)
 
 
 def speaking_kb():
@@ -585,6 +597,16 @@ def reminders_kb():
     kb.button(text="➕ Yangi eslatma", callback_data="tools:rem_new")
     kb.button(text="📋 Mening eslatmalarim", callback_data="tools:rem_list")
     kb.button(text="⬅️ Bosh menyu", callback_data="menu:tools")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def stats_admin_kb():
+    """Statistika bo'limi (faqat admin): kanal qo'shish + kanallar statistikasi."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Kanal qo'shish", callback_data="stats:chanadd")
+    kb.button(text="📈 Kanallar statistikasi", callback_data="stats:chanstats")
+    kb.button(text="⬅️ Bosh menyu", callback_data="menu:main")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1067,7 +1089,7 @@ async def cmd_start(message: Message) -> None:
         f"👋 Salom, *{name}*!\n\n"
         "Men *AI Manager* — HAMMA soha bo'yicha AI yordamchingizman.\n\n"
         "Quyidagi bo'limlardan birini tanlang 👇",
-        reply_markup=main_menu_kb(),
+        reply_markup=_menu_kb_for(u),
     )
     await _ans(message,
         "ℹ️ Pastdagi doimiy paneldan ham foydalanishingiz mumkin:\n"
@@ -1082,7 +1104,7 @@ async def cmd_menu(message: Message) -> None:
     u = message.from_user
     if u:
         await db.upsert_user(u.id, u.username, u.first_name)
-    await _ans(message, "🏠 *Asosiy menyu* — bo'limni tanlang:", reply_markup=main_menu_kb())
+    await _ans(message, "🏠 *Asosiy menyu* — bo'limni tanlang:", reply_markup=_menu_kb_for(u))
 
 
 @dp.message(Command("help"))
@@ -1099,7 +1121,7 @@ async def cmd_help(message: Message) -> None:
         "🎯 *Buyruqlar:*\n"
         "`/menu` — asosiy menyu\n"
         "`/quiz` — soha bo'yicha test\n"
-        "`/stats` — statistika\n"
+        "`/stats` — statistika (faqat admin)\n"
         "`/history` — suhbat tarixi\n"
         "`/lang` — til (uz/en/ru)\n"
         "`/bank [so'z]` — savollar banki\n"
@@ -1136,12 +1158,8 @@ async def cmd_quiz(message: Message) -> None:
     await _ans(message, "🎯 *Test o'tash*\n\nQaysi sohadan boshlaymiz?", reply_markup=kb.as_markup())
 
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message) -> None:
-    u = message.from_user
-    if u:
-        await db.upsert_user(u.id, u.username, u.first_name)
-
+async def build_stats_text(u) -> str:
+    """Statistika matnini tayyorlaydi (faqat admin ko'radi)."""
     users = await db.count_users()
     msgs = await db.count_messages()
     instant = await db.count_instant_replies()
@@ -1177,7 +1195,22 @@ async def cmd_stats(message: Message) -> None:
         for r in results:
             lines.append(f"• {r['topic']}: {r['score']}/{r['total']}")
 
-    await _ans(message, "\n".join(lines))
+    return "\n".join(lines)
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    """Statistika — FAQAT admin uchun."""
+    u = message.from_user
+    if u:
+        await db.upsert_user(u.id, u.username, u.first_name)
+    if not u or not config.is_admin(u.id, u.username):
+        await _ans(message, 
+            "🔒 *Statistika* faqat admin uchun.\n\n"
+            f"Admin: @{config.ADMIN_USERNAMES[0] if config.ADMIN_USERNAMES else 'admin'}"
+        )
+        return
+    await _ans(message, await build_stats_text(u))
 
 
 @dp.message(Command("history"))
@@ -1222,7 +1255,7 @@ async def cmd_reset(message: Message) -> None:
     await _ans(message, 
         "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
         "gaplarni eslab qolmaydi.",
-        reply_markup=main_menu_kb(),
+        reply_markup=_menu_kb_for(u),
     )
 
 
@@ -1237,7 +1270,7 @@ async def on_sub_check(cb: CallbackQuery) -> None:
         await _edit(cb, 
             "✅ *Rahmat!* Kanalga ulandingiz.\n\n"
             "🏠 *Asosiy menyu* — bo'limni tanlang:",
-            reply_markup=main_menu_kb(),
+            reply_markup=_menu_kb_for(cb.from_user),
         )
         return
     await cb.answer("❌ Hali ulanmagansiz", show_alert=True)
@@ -1270,12 +1303,12 @@ async def on_menu_reset(cb: CallbackQuery) -> None:
         await _edit(cb, 
             "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
             "gaplarni eslab qolmaydi.\n\n🏠 *Asosiy menyu* — bo'limni tanlang:",
-            reply_markup=main_menu_kb(),
+            reply_markup=_menu_kb_for(cb.from_user),
         )
     except Exception:  # noqa: BLE001
         await _ans(cb.message, 
             "🔄 Suhbat tozalandi. Yangi suhbat boshlandi.",
-            reply_markup=main_menu_kb(),
+            reply_markup=_menu_kb_for(cb.from_user),
         )
 
 
@@ -1370,9 +1403,9 @@ async def on_menu_main(cb: CallbackQuery) -> None:
     await db.clear_user_state(cb.from_user.id)
     try:
         await _edit(cb, "🏠 *Asosiy menyu* — bo'limni tanlang:",
-                                   reply_markup=main_menu_kb())
+                                   reply_markup=_menu_kb_for(cb.from_user))
     except Exception:  # noqa: BLE001
-        await _ans(cb.message, "🏠 *Asosiy menyu*:", reply_markup=main_menu_kb())
+        await _ans(cb.message, "🏠 *Asosiy menyu*:", reply_markup=_menu_kb_for(cb.from_user))
 
 
 @dp.callback_query(F.data == "menu:ai")
@@ -1463,6 +1496,76 @@ async def on_menu_pdftest(cb: CallbackQuery) -> None:
             text="⬅️ Bosh menyu", callback_data="menu:main"
         ).as_markup(),
     )
+
+
+@dp.callback_query(F.data == "menu:stats")
+async def on_menu_stats(cb: CallbackQuery) -> None:
+    """Statistika bo'limi — FAQAT admin uchun."""
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, 
+            "🔒 *Statistika* faqat admin uchun.\n\n"
+            f"Admin: @{config.ADMIN_USERNAMES[0] if config.ADMIN_USERNAMES else 'admin'}"
+        )
+        return
+    n = await db.count_channels()
+    text = await build_stats_text(u) + f"\n\n📢 Ulangan kanallar: *{n}* ta"
+    try:
+        await _edit(cb, text, reply_markup=stats_admin_kb())
+    except Exception:  # noqa: BLE001
+        await _ans(cb.message, text, reply_markup=stats_admin_kb())
+
+
+@dp.callback_query(F.data == "stats:chanadd")
+async def on_stats_chanadd(cb: CallbackQuery) -> None:
+    """Statistika bo'limidan kanal qo'shish (admin)."""
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, "🔒 Faqat admin uchun.")
+        return
+    await db.set_user_state(u.id, "chan_connect", {})
+    await _edit(cb, 
+        "➕ *Kanal qo'shish*\n\n"
+        "Kanalning @username ini yoki ID sini yuboring.\n\n"
+        "⚠️ Bot kanalda *admin* bo'lishi shart.\n\n"
+        "Misol: `@mening_kanalim` yoki `-1001234567890`"
+    )
+
+
+@dp.callback_query(F.data == "stats:chanstats")
+async def on_stats_chanstats(cb: CallbackQuery) -> None:
+    """Qo'shilgan kanallar statistikasi: a'zolar soni, postlar soni."""
+    u = cb.from_user
+    await cb.answer()
+    if not config.is_admin(u.id, u.username):
+        await _edit(cb, "🔒 Faqat admin uchun.")
+        return
+    rows = await db.list_channels()
+    if not rows:
+        await _edit(cb, 
+            "📈 Hozircha kanal yo'q. «➕ Kanal qo'shish» orqali ulang.",
+            reply_markup=stats_admin_kb(),
+        )
+        return
+    lines = ["📈 *Kanallar statistikasi*\n"]
+    for r in rows:
+        cid = r["channel_id"]
+        posts = await db.count_channel_posts(cid)
+        sent = await db.count_channel_posts(cid, sent_only=True)
+        members = "—"
+        try:
+            members = str(await bot.get_chat_member_count(cid))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("A'zolar sonini olib bo'lmadi (%s): %s", cid, exc)
+        uname = f" (@{r['username']})" if r["username"] else ""
+        lines.append(
+            f"• *{esc(r['title'] or cid)}*{uname}\n"
+            f"  🆔 `{cid}`\n"
+            f"  👥 A'zolar: *{members}* · 📨 Postlar: *{posts}* (yuborilgan: *{sent}*)"
+        )
+    await _edit(cb, "\n".join(lines), reply_markup=stats_admin_kb())
 
 
 @dp.callback_query(F.data == "menu:quiz")
@@ -2597,6 +2700,117 @@ async def on_lang_choice(cb: CallbackQuery) -> None:
 # --------------------------------------------------------------------------- #
 # Handlers — ovoz, rasm, PDF, erkin matn
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Handlers — Bot kanalga admin qilinganda (my_chat_member)
+# --------------------------------------------------------------------------- #
+async def notify_admins_channel(cid: int, added_by, chat, chat_id: int) -> None:
+    """Bot kanalga qo'shilganda adminlarga xabar yuboradi va ruxsat so'raydi."""
+    admin_ids = await get_admin_ids()
+    if not admin_ids:
+        log.warning("Admin ID topilmadi — kanal so'rovi yuborilmadi (id=%s).", cid)
+        return
+    if added_by:
+        uname = f"@{added_by.username}" if added_by.username else (added_by.first_name or "noma'lum")
+        uid = added_by.id
+    else:
+        uname = "noma'lum"
+        uid = 0
+    uname2 = f" (@{chat.username})" if getattr(chat, "username", None) else ""
+    text = (
+        "📢 *Bot kanalga admin qilindi*\n\n"
+        f"👤 Qo'shgan: {esc(uname)}\n"
+        f"🆔 Foydalanuvchi ID: `{uid}`\n"
+        f"📣 Kanal: *{esc(chat.title or chat_id)}*{uname2}\n"
+        f"🆔 Kanal ID: `{chat_id}`\n\n"
+        "Bu kanalni botga ulashga ruxsat berasizmi?"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Ruxsat berish", callback_data=f"admin:chan:ok:{cid}")
+    kb.button(text="❌ Rad etish", callback_data=f"admin:chan:no:{cid}")
+    kb.adjust(2)
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text, reply_markup=kb.as_markup(),
+                                   parse_mode="HTML")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Adminga (%s) kanal so'rovi yuborilmadi: %s", admin_id, exc)
+
+
+@dp.my_chat_member()
+async def on_my_chat_member(event: ChatMemberUpdated) -> None:
+    """Bot kanalga admin qilinganda adminlarga xabar yuboradi va ruxsat so'raydi."""
+    chat = event.chat
+    if getattr(chat, "type", "") != "channel":
+        return
+    new_status = getattr(event.new_chat_member, "status", "")
+    old_status = getattr(event.old_chat_member, "status", "")
+    new_s = new_status.value if hasattr(new_status, "value") else str(new_status)
+    old_s = old_status.value if hasattr(old_status, "value") else str(old_status)
+    if new_s not in ("administrator", "creator"):
+        return
+    if old_s in ("administrator", "creator"):
+        return  # allaqachon admin edi — qayta so'ramaymiz
+    if await db.get_channel(chat.id):
+        return  # allaqachon ulangan
+
+    added_by = event.from_user
+    cid = await db.create_pending_channel(
+        chat.id, chat.title or "", chat.username or "",
+        added_by.id if added_by else 0,
+    )
+    log.info("Kanal tasdiqlash so'rovi yaratildi: %s (#%s)", chat.id, cid)
+    await notify_admins_channel(cid, added_by, chat, chat.id)
+
+
+@dp.callback_query(F.data.startswith("admin:chan:"))
+async def on_admin_channel_decision(cb: CallbackQuery) -> None:
+    """Admin kanalni botga ulashga ruxsat beradi yoki rad etadi."""
+    parts = cb.data.split(":")
+    if len(parts) != 4:
+        return
+    _, _, decision, cid_s = parts
+    cid = int(cid_s)
+    u = cb.from_user
+    if not config.is_admin(u.id, u.username):
+        await cb.answer("Faqat admin ruxsat berishi mumkin.", show_alert=True)
+        return
+    req = await db.get_pending_channel(cid)
+    if not req or req["status"] != "pending":
+        await cb.answer("Bu so'rov allaqachon ko'rib chiqilgan.", show_alert=True)
+        return
+
+    if decision == "ok":
+        await db.add_channel(
+            req["requested_by"] or u.id, req["channel_id"],
+            req["title"] or "", req["username"] or "",
+        )
+        await db.set_pending_channel_status(cid, "approved", u.id)
+        await cb.answer("Ruxsat berildi ✅")
+        try:
+            await cb.message.edit_text(
+                f"✅ *Kanal botga ulandi!*\n\n"
+                f"📣 {esc(req['title'] or req['channel_id'])}\n"
+                f"🆔 `{req['channel_id']}`\n\n"
+                "Endi kanal statistikada ko'rinadi va kanalga post joylash mumkin."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await bot.send_message(
+                req["channel_id"],
+                "✅ Bu kanal botga ulandi. Endi admin kanalga post joylashi va kanalni boshqarishi mumkin.",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Kanalga xabar yuborilmadi (%s): %s", req["channel_id"], exc)
+    else:
+        await db.set_pending_channel_status(cid, "rejected", u.id)
+        await cb.answer("Rad etildi ❌")
+        try:
+            await cb.message.edit_text(f"❌ Kanal so'rovi rad etildi (`{req['channel_id']}`).")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @dp.message(F.document)
 async def on_document(message: Message) -> None:
     """PDF faylni qabul qilib, undan test qo'shadi (admin yoki ruxsat olgan)."""
@@ -2820,7 +3034,7 @@ async def on_text(message: Message) -> None:
         name = u.first_name or "do'stim"
         await _ans(message, 
             f"👋 Xush kelibsiz, *{name}*!\n\nBo'limni tanlang 👇",
-            reply_markup=main_menu_kb(),
+            reply_markup=_menu_kb_for(u),
         )
         await _ans(message, "ℹ️ Doimiy panel pastda qoladi.",
                    reply_markup=main_reply_kb())
@@ -2828,14 +3042,14 @@ async def on_text(message: Message) -> None:
     if text == BTN_MAIN:
         await db.clear_user_state(u.id)
         await _ans(message, "🏠 *Asosiy menyu* — bo'limni tanlang:",
-                   reply_markup=main_menu_kb())
+                   reply_markup=_menu_kb_for(u))
         return
     if text == BTN_RESET:
         await db.clear_user_state(u.id)
         await db.clear_history(u.id)
         await _ans(message, 
             "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi.",
-            reply_markup=main_menu_kb(),
+            reply_markup=_menu_kb_for(u),
         )
         return
     if text == BTN_REMIND:

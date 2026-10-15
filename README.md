@@ -215,7 +215,7 @@ IELTS Speaking, IELTS Writing, Matematika, Fizika, Vositalar,
 | `/help` | Batafsil yordam |
 | `/quiz` | Soha bo'yicha test o'tash |
 | `/reset` | Suhbatni tozalash — bot kontekstni unutadi (yangi suhbat) |
-| `/stats` | Statistika (foydalanuvchilar, so'rovlar, sohalar) |
+| `/stats` | Statistika — **faqat admin** (boshqalarga ko'rinmaydi) |
 | `/history` | Oxirgi suhbatlar tarixi |
 | `/clearhistory` | Suhbat tarixini tozalash |
 | `/lang` | Til tanlash (uz / en / ru) |
@@ -843,6 +843,59 @@ Render o'zi qayta deploy qiladi.
 - ✅ Haqiqiy PDF yaratib, matn ajratish (pypdf)
 
 **Jami: 32/32 test o'tdi.**
+
+`python test_v13.py` (v13 — panel, kanal gate, xotira): **38/38 ✅**
+`python test_memory.py` (v13 — suhbat xotirasi): **34/34 ✅**
+
+`python test_channel_stats.py` (v6 — kanal tasdiqlash + admin statistikasi):
+- ✅ Asosiy menyuda **📊 Statistika** faqat **adminga** ko'rinadi
+- ✅ `/stats` buyrug'i va `menu:stats` callback faqat admin uchun
+- ✅ Stats bo'limida **➕ Kanal qo'shish** va **📈 Kanallar statistikasi**
+- ✅ Bot kanalga **admin qilinganda** (`my_chat_member`) adminga xabar boradi:
+  "@foydalanuvchi shu kanalni botga qo'shdi" + ✅ Ruxsat berish / ❌ Rad etish
+- ✅ Ruxsat berilgach kanal botga ulanadi; rad etilsa ulanmaydi
+- ✅ Begona foydalanuvchi kanal qarorini qabul qila olmaydi
+- ✅ Kanallar statistikasi: a'zolar soni (+ postlar soni, yuborilganlar) ko'rsatiladi
+
+**Jami: 30/30 test o'tdi.**
+
+---
+
+## 📢 Kanal admini va statistika (v6'da qo'shildi)
+
+### Bot kanalga admin qilinganda
+1. Foydalanuvchi botni kanalga **admin** qilib qo'shadi.
+2. Bot `my_chat_member` hodisasini oladi va **adminga** xabar yuboradi:
+   ```
+   📢 Bot kanalga admin qilindi
+   👤 Qo'shgan: @foydalanuvchi
+   🆔 Foydalanuvchi ID: 123456789
+   📣 Kanal: Kanal nomi (@kanal)
+   🆔 Kanal ID: -1001234567890
+   ```
+3. Admin **✅ Ruxsat berish** / **❌ Rad etish** tugmalari bilan javob beradi.
+4. Ruxsat berilgach kanal botga **ulanadi** (post joylash va boshqarish uchun).
+   Rad etilsa — kanal ulanmaydi. Bot allaqachon admin bo'lgan yoki kanal
+   avval ulangan bo'lsa, takroriy so'rov yuborilmaydi.
+
+### Statistika (faqat admin)
+- **📊 Statistika** tugmasi **faqat adminning asosiy menyusida** ko'rinadi.
+  Oddiy foydalanuvchi menyusida bu tugma **yo'q**; `/stats` ham taqiqlangan.
+- Statistika bo'limida:
+  - Umumiy ko'rsatkichlar (foydalanuvchilar, xabarlar, testlar, AI so'rovlar)
+  - **➕ Kanal qo'shish** — @username yoki ID orqali kanal ulash
+  - **📈 Kanallar statistikasi** — har bir kanal uchun:
+    - 👥 **a'zolar soni** (Telegram'dan jonli olinadi)
+    - 📨 **postlar soni** (jami / yuborilgan)
+    - 🆔 kanal ID va @username
+
+### Yangi jadval: `pending_channels`
+Bot kanalga admin qilinganda yaratiladigan tasdiqlash so'rovlari:
+`channel_id`, `title`, `username`, `requested_by`, `status`, `created_at`,
+`decided_by`, `decided_at`.
+
+**Yangi callback'lar:** `admin:chan:ok:<id>`, `admin:chan:no:<id>`,
+`menu:stats`, `stats:chanadd`, `stats:chanstats`.
 
 ---
 

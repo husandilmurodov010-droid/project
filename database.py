@@ -240,6 +240,20 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_spost_due ON scheduled_posts(sent, run_at);
 
+-- ===================== v6: kanal tasdiqlash (bot kanalga admin qilinganda) =====================
+
+CREATE TABLE IF NOT EXISTS pending_channels (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id   INTEGER NOT NULL UNIQUE,
+    title        TEXT    DEFAULT '',
+    username     TEXT    DEFAULT '',
+    requested_by INTEGER,
+    status       TEXT    DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected'
+    created_at   REAL    NOT NULL,
+    decided_by   INTEGER,
+    decided_at   REAL
+);
+
 -- ===================== v5: PDF testlar =====================
 
 CREATE TABLE IF NOT EXISTS pdf_tests (
@@ -1125,6 +1139,70 @@ class Database:
         cur = await self.db.execute("SELECT COUNT(*) AS c FROM channels")
         row = await cur.fetchone()
         return int(row["c"]) if row else 0
+
+    async def count_channel_posts(self, channel_id: int, sent_only: bool = False) -> int:
+        """Kanal uchun rejalashtirilgan (yoki yuborilgan) postlar soni."""
+        if sent_only:
+            cur = await self.db.execute(
+                "SELECT COUNT(*) AS c FROM scheduled_posts WHERE channel_id = ? AND sent = 1",
+                (channel_id,),
+            )
+        else:
+            cur = await self.db.execute(
+                "SELECT COUNT(*) AS c FROM scheduled_posts WHERE channel_id = ?",
+                (channel_id,),
+            )
+        row = await cur.fetchone()
+        return int(row["c"]) if row else 0
+
+    # ================================================================== #
+    # v6: kanal tasdiqlash oqimi (bot kanalga admin qilinganda)
+    # ================================================================== #
+    async def create_pending_channel(
+        self, channel_id: int, title: str = "", username: str = "",
+        requested_by: Optional[int] = None,
+    ) -> int:
+        """Kanal uchun tasdiqlash so'rovini yaratadi (yoki yangilaydi) va id qaytaradi."""
+        await self.db.execute(
+            """
+            INSERT INTO pending_channels
+                (channel_id, title, username, requested_by, status, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                title        = excluded.title,
+                username     = excluded.username,
+                requested_by = excluded.requested_by,
+                status       = 'pending'
+            """,
+            (channel_id, title, username, requested_by, time.time()),
+        )
+        await self.db.commit()
+        cur = await self.db.execute(
+            "SELECT id FROM pending_channels WHERE channel_id = ?", (channel_id,)
+        )
+        row = await cur.fetchone()
+        return int(row["id"]) if row else 0
+
+    async def get_pending_channel(self, cid: int) -> Optional[dict[str, Any]]:
+        cur = await self.db.execute("SELECT * FROM pending_channels WHERE id = ?", (cid,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def set_pending_channel_status(
+        self, cid: int, status: str, decided_by: Optional[int] = None
+    ) -> None:
+        await self.db.execute(
+            "UPDATE pending_channels SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            (status, decided_by, time.time(), cid),
+        )
+        await self.db.commit()
+
+    async def list_pending_channels(self, status: str = "pending") -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT * FROM pending_channels WHERE status = ? ORDER BY id", (status,)
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     # ================================================================== #
     # v4: Rejalashtirilgan postlar
