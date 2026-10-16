@@ -323,6 +323,20 @@ CREATE TABLE IF NOT EXISTS channel_engagement_snapshots (
     taken_at        REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cheeng ON channel_engagement_snapshots(channel_id, taken_at);
+
+-- ===== v11: chat tozalash uchun xabar kuzatuvi =====
+-- Bot va foydalanuvchi yuborgan xabarlar id lari (shaxsiy chatda).
+-- "Suhbatni tozalash" bosilganda shu jadval orqali xabarlar o'chiriladi.
+CREATE TABLE IF NOT EXISTS sent_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,          -- xabar tegishli foydalanuvchi
+    chat_id    INTEGER NOT NULL,          -- shaxsiy chat id (user_id ga teng)
+    message_id INTEGER NOT NULL,
+    kind       TEXT    DEFAULT '',        -- 'incoming' | yuborilgan metod nomi
+    created_at REAL    NOT NULL,
+    UNIQUE(user_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sentmsg ON sent_messages(user_id, id DESC);
 """
 
 
@@ -555,6 +569,56 @@ class Database:
         await self.db.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
         await self.db.commit()
         return n
+
+    # ------------------------------------------------------------------ #
+    # v11: chat tozalash uchun xabar kuzatuvi (message tracking)
+    # ------------------------------------------------------------------ #
+    async def track_sent_message(
+        self, user_id: int, chat_id: int, message_id: int, kind: str = ""
+    ) -> None:
+        """Shu foydalanuvchi chatidagi xabar id sini yozib qo'yadi.
+
+        `user_id` — xabar tegishli foydalanuvchi (shaxsiy chatda chat_id ga teng).
+        `kind` — 'incoming' (foydalanuvchi yuborgan) yoki yuborilgan metod nomi.
+        Faqat shu foydalanuvchi bo'yicha yoziladi — boshqalarga tegmaydi.
+        """
+        try:
+            await self.db.execute(
+                """
+                INSERT OR IGNORE INTO sent_messages
+                    (user_id, chat_id, message_id, kind, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (int(user_id), int(chat_id), int(message_id), kind or "", time.time()),
+            )
+            # 48 soatdan eski yozuvlar baribir o'chirilmaydi (Telegram cheklovi)
+            # — ularni tozalab turamiz, jadval cheksiz o'smasin.
+            await self.db.execute(
+                "DELETE FROM sent_messages WHERE user_id = ? AND created_at < ?",
+                (int(user_id), time.time() - 48 * 3600),
+            )
+            await self.db.commit()
+        except Exception:  # noqa: BLE001
+            log.debug("track_sent_message xato", exc_info=True)
+
+    async def get_sent_messages(self, user_id: int, limit: int = 3000) -> list[int]:
+        """Shu foydalanuvchi chatidagi kuzatilgan xabar id lari (eng yangisi birinchi)."""
+        cur = await self.db.execute(
+            """
+            SELECT message_id FROM sent_messages
+            WHERE user_id = ? ORDER BY id DESC LIMIT ?
+            """,
+            (int(user_id), int(limit)),
+        )
+        rows = await cur.fetchall()
+        return [int(r["message_id"]) for r in rows]
+
+    async def clear_sent_messages(self, user_id: int) -> None:
+        """Shu foydalanuvchining kuzatuv yozuvlarini o'chiradi (faqat shu user)."""
+        await self.db.execute(
+            "DELETE FROM sent_messages WHERE user_id = ?", (int(user_id),)
+        )
+        await self.db.commit()
 
     async def get_context_history(
         self, user_id: int, limit: int = 6

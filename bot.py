@@ -45,7 +45,29 @@ from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatAction, ParseMode
+from aiogram.methods import (
+    CopyMessage,
+    ForwardMessage,
+    SendAnimation,
+    SendAudio,
+    SendContact,
+    SendDice,
+    SendDocument,
+    SendGame,
+    SendInvoice,
+    SendLocation,
+    SendMediaGroup,
+    SendMessage,
+    SendPhoto,
+    SendPoll,
+    SendSticker,
+    SendVenue,
+    SendVideo,
+    SendVideoNote,
+    SendVoice,
+)
 from aiogram.exceptions import TelegramConflictError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -252,11 +274,54 @@ PHYSICS_SOLVER_PROMPT = (
 )
 
 # --------------------------------------------------------------------------- #
+# v11: Xabar kuzatuvi (message tracking) — chat tozalash uchun
+# --------------------------------------------------------------------------- #
+# Bot yuborgan xabarlar id larini bazaga yozib boramiz. «Suhbatni tozalash»
+# bosilganda shu id lar orqali xabarlar deleteMessage bilan o'chiriladi.
+_TRACKED_SEND_METHODS = (
+    SendMessage, SendPhoto, SendDocument, SendVideo, SendAnimation,
+    SendAudio, SendVoice, SendVideoNote, SendSticker, SendMediaGroup,
+    SendLocation, SendVenue, SendContact, SendPoll, SendDice,
+    SendInvoice, SendGame, CopyMessage, ForwardMessage,
+)
+
+
+class TrackingSession(AiohttpSession):
+    """AiohttpSession — yuborilgan xabarlar id larini kuzatib boradi.
+
+    Faqat SHAXSIY chatlarga (chat_id > 0) yuborilgan xabarlar yoziladi.
+    Kanal/guruh xabarlariga tegmaydi.
+    """
+
+    async def make_request(self, bot, method, timeout=None):
+        result = await super().make_request(bot, method, timeout=timeout)
+        try:
+            if isinstance(method, _TRACKED_SEND_METHODS):
+                chat_id = getattr(method, "chat_id", None)
+                if isinstance(chat_id, int) and chat_id > 0:
+                    ids: list[int] = []
+                    if isinstance(result, Message):
+                        ids.append(result.message_id)
+                    elif isinstance(result, (list, tuple)):
+                        for m in result:
+                            if isinstance(m, Message):
+                                ids.append(m.message_id)
+                    for mid in ids:
+                        await db.track_sent_message(
+                            chat_id, chat_id, mid, type(method).__name__
+                        )
+        except Exception:  # noqa: BLE001
+            log.debug("Xabar kuzatuvida xato", exc_info=True)
+        return result
+
+
+# --------------------------------------------------------------------------- #
 # Bot / Dispatcher
 # --------------------------------------------------------------------------- #
 bot = Bot(
     token=config.BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+    session=TrackingSession(),
 )
 dp = Dispatcher()
 
@@ -852,6 +917,27 @@ async def sub_gate_outer_middleware(handler, event, data):
     return None
 
 
+async def track_incoming_middleware(handler, event, data):
+    """Shaxsiy chatga kelgan foydalanuvchi xabarlarini kuzatib boradi.
+
+    «Suhbatni tozalash» bosilganda shu xabarlar ham `deleteMessage` bilan
+    o'chiriladi. Faqat shaxsiy chatlar (chat.type == 'private') uchun
+    ishlaydi — kanal/guruh xabarlariga tegmaydi.
+    """
+    try:
+        if (
+            isinstance(event, Message)
+            and event.chat is not None
+            and event.chat.type == "private"
+        ):
+            await db.track_sent_message(
+                event.chat.id, event.chat.id, event.message_id, "incoming"
+            )
+    except Exception:  # noqa: BLE001
+        log.debug("Kiruvchi xabarni kuzatishda xato", exc_info=True)
+    return await handler(event, data)
+
+
 async def _ans(message: Message, text: str, **kwargs) -> None:
     """Javob yuboradi va tagiga '⬅️ Orqaga' + '🏠 Asosiy menyu' tugmalarini qo'shadi."""
     kwargs["reply_markup"] = _with_back(kwargs.get("reply_markup"))
@@ -865,19 +951,95 @@ async def _edit(cb: CallbackQuery, text: str, **kwargs) -> None:
     await cb.message.edit_text(text, **kwargs)
 
 
-async def _reset_my_conversation(user_id: int) -> int:
-    """FAQAT shu foydalanuvchining suhbat tarixini tozalaydi.
+async def _purge_my_chat(user_id: int, extra_ids: list[int] | None = None) -> int:
+    """Shu foydalanuvchining SHAXSIY chatidagi barcha xabarlarni o'chiradi.
 
-    Boshqa foydalanuvchilarning suhbatiga hech qanday ta'sir qilmaydi:
-    `chat_history` faqat `user_id` bo'yicha o'chiriladi. Shu foydalanuvchining
-    navigatsiya tarixi ham tozalanadi. O'chirilgan qatlamlar sonini qaytaradi.
+    Bot yuborgan xabarlar ham, foydalanuvchi yuborgan xabarlar ham
+    `deleteMessage` orqali o'chiriladi (Telegram botlarga shaxsiy chatda
+    ikkalasini ham o'chirishga ruxsat beradi). Faqat 48 soatdan yangi
+    xabarlar o'chiriladi — bu Telegram cheklovi. Boshqa foydalanuvchilarga
+    va kanallarga HECH QANDAY ta'sir qilmaydi. O'chirilgan xabarlar sonini
+    qaytaradi.
+    """
+    ids: list[int] = []
+    try:
+        ids = await db.get_sent_messages(user_id)
+    except Exception:  # noqa: BLE001
+        log.exception("Kuzatilgan xabarlarni olishda xato (user=%s)", user_id)
+    if extra_ids:
+        for mid in extra_ids:
+            if mid and mid not in ids:
+                ids.append(mid)
+
+    deleted = 0
+    for mid in ids:
+        try:
+            await bot.delete_message(chat_id=user_id, message_id=mid)
+            deleted += 1
+        except Exception:  # noqa: BLE001
+            # 48 soatdan eski yoki allaqachon o'chirilgan — e'tiborsiz qoldiramiz
+            pass
+        # Telegram flood-limitiga tushmaslik uchun kichik pauza
+        await asyncio.sleep(0.03)
+
+    try:
+        await db.clear_sent_messages(user_id)
+    except Exception:  # noqa: BLE001
+        log.debug("Kuzatuv yozuvlarini tozalashda xato", exc_info=True)
+    return deleted
+
+
+async def _reset_my_conversation(
+    user_id: int, extra_ids: list[int] | None = None
+) -> int:
+    """FAQAT shu foydalanuvchining suhbatini to'liq tozalaydi.
+
+    1) Bazadagi suhbat konteksti (`chat_history`) va joriy holat
+       (`user_states`) shu foydalanuvchi uchun o'chiriladi.
+    2) Shaxsiy chatdagi BARCHA xabarlar (bot + foydalanuvchi) `deleteMessage`
+       bilan o'chiriladi — chat toza holatga qaytadi.
+    3) Navigatsiya tarixi tozalanadi.
+
+    Kanallar, testlar, savollar, statistika, foydalanuvchilar bazasi va
+    boshqa foydalanuvchilar ma'lumotlariga HECH QANDAY ta'sir qilmaydi.
+    O'chirilgan suhbat qatlamlari sonini qaytaradi.
     """
     _nav_stack.pop(user_id, None)
+    n = 0
     try:
-        return await db.clear_conversation(user_id)
+        n = await db.clear_conversation(user_id)
     except Exception:  # noqa: BLE001
         log.exception("Suhbatni tozalashda xato (user=%s)", user_id)
-        return 0
+    try:
+        await _purge_my_chat(user_id, extra_ids=extra_ids)
+    except Exception:  # noqa: BLE001
+        log.exception("Chatni tozalashda xato (user=%s)", user_id)
+    return n
+
+
+async def _send_fresh_start(message: Message, user) -> None:
+    """Tozalashdan keyin /start kabi toza boshlang'ich holatni ko'rsatadi.
+
+    Chatda faqat shu boshlang'ich xabar(lar) qoladi — eski suhbat o'chirilgan
+    bo'ladi. Doimiy panel ham qayta o'rnatiladi.
+    """
+    name = getattr(user, "first_name", None) or "do'stim"
+    try:
+        await message.answer(
+            f"👋 Salom, *{name}*!\n\n"
+            "Men *AI Manager* — HAMMA soha bo'yicha AI yordamchingizman.\n\n"
+            "Quyidagi bo'limlardan birini tanlang 👇",
+            reply_markup=_menu_kb_for(user),
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("Boshlang'ich xabarni yuborishda xato")
+    try:
+        await message.answer(
+            "ℹ️ Pastdagi doimiy paneldan ham foydalanishingiz mumkin.",
+            reply_markup=main_reply_kb(),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("Doimiy panelni o'rnatishda xato", exc_info=True)
 
 
 async def _safe_send(message: Message, text: str) -> None:
@@ -1593,19 +1755,11 @@ async def cmd_start(message: Message) -> None:
     if not await is_subscribed(u.id if u else 0, force=True):
         await message.answer(gate_text(), reply_markup=sub_gate_kb())
         return
-    name = u.first_name if u else "do'stim"
-    await _ans(message, 
-        f"👋 Salom, *{name}*!\n\n"
-        "Men *AI Manager* — HAMMA soha bo'yicha AI yordamchingizman.\n\n"
-        "Quyidagi bo'limlardan birini tanlang 👇",
-        reply_markup=_menu_kb_for(u),
-    )
-    await _ans(message,
-        "ℹ️ Pastdagi doimiy paneldan ham foydalanishingiz mumkin:\n"
-        f"«{BTN_START}», «{BTN_MAIN}», «{BTN_REMIND}», «{BTN_RESET}», "
-        f"«{BTN_CHANNEL}».",
-        reply_markup=main_reply_kb(),
-    )
+    # /start — to'liq tozalash: chatdagi eski xabarlar o'chiriladi va toza
+    # boshlang'ich holat ko'rsatiladi (faqat shu boshlang'ich xabar qoladi).
+    if u:
+        await _reset_my_conversation(u.id, extra_ids=[message.message_id])
+    await _send_fresh_start(message, u)
 
 
 @dp.message(Command("menu"))
@@ -1792,22 +1946,18 @@ async def cmd_clear_history(message: Message) -> None:
     u = message.from_user
     if not u:
         return
-    await _reset_my_conversation(u.id)
-    await _ans(message, "🗑 Suhbat tarixi tozalandi.")
+    await _reset_my_conversation(u.id, extra_ids=[message.message_id])
+    await _send_fresh_start(message, u)
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
-    """Suhbatni tozalab, yangi suhbat boshlaydi (kontekstni unutadi)."""
+    """Suhbatni to'liq tozalab, /start kabi toza holatga qaytaradi."""
     u = message.from_user
     if not u:
         return
-    await _reset_my_conversation(u.id)
-    await _ans(message, 
-        "🔄 *Suhbat tozalandi.* Yangi suhbat boshlandi — endi bot oldingi "
-        "gaplarni eslab qolmaydi.",
-        reply_markup=_menu_kb_for(u),
-    )
+    await _reset_my_conversation(u.id, extra_ids=[message.message_id])
+    await _send_fresh_start(message, u)
 
 
 # --------------------------------------------------------------------------- #
@@ -1848,26 +1998,16 @@ async def on_sub_noaccess(cb: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "menu:reset")
 async def on_menu_reset(cb: CallbackQuery) -> None:
-    """Suhbat tarixini tozalab, yangi suhbat boshlaydi."""
+    """Suhbatni TO'LIQ tozalaydi: chatdagi barcha xabarlar (bot + foydalanuvchi)
+    o'chiriladi va foydalanuvchi /start kabi toza holatga qaytadi."""
     await cb.answer("Suhbat tozalandi")
-    # 3-talab: suhbat HAR IKKI tomondan tozalanadi (chat_history + user_states)
-    n = await _reset_my_conversation(cb.from_user.id)
-    try:
-        await _edit(cb, 
-            "🔄 *Suhbat tozalandi.* Eski suhbat ham, bot xotirasi ham tozalandi "
-            f"({n} ta qatlam o'chirildi).\n\n"
-            "▶️ Yangi suhbatni boshlash uchun /start ni yuboring.\n\n"
-            "🏠 *Asosiy menyu* — bo'limni tanlang:",
-            reply_markup=_menu_kb_for(cb.from_user),
-        )
-    except Exception:  # noqa: BLE001
-        await _ans(cb.message, 
-            "🔄 Suhbat tozalandi. Yangi suhbatni /start bilan boshlang.",
-            reply_markup=_menu_kb_for(cb.from_user),
-        )
-    # Tozalashdan keyin «⬅️ Orqaga» o'chirilgan ekranga qaytmasligi uchun
-    # navigatsiya tarixini ham tozalaymiz (faqat shu foydalanuvchi uchun).
-    _nav_stack.pop(cb.from_user.id, None)
+    u = cb.from_user
+    # Callback xabarining o'zini ham o'chiramiz — u ham chatda qolmasin.
+    extra = [cb.message.message_id] if cb.message else []
+    await _reset_my_conversation(u.id, extra_ids=extra)
+    # Toza boshlang'ich xabar (xuddi /start kabi).
+    if cb.message is not None:
+        await _send_fresh_start(cb.message, u)
 
 
 # --------------------------------------------------------------------------- #
@@ -4553,15 +4693,10 @@ async def on_text(message: Message) -> None:
 
     # 0) Pastdagi doimiy panel tugmalari (oddiy, tabiiy)
     if text == BTN_START:
-        # /start — yangi suhbat: AI xotirasi ham, joriy holat ham tozalanadi
-        await _reset_my_conversation(u.id)
-        name = u.first_name or "do'stim"
-        await _ans(message, 
-            f"👋 Xush kelibsiz, *{name}*!\n\nBo'limni tanlang 👇",
-            reply_markup=_menu_kb_for(u),
-        )
-        await _ans(message, "ℹ️ Doimiy panel pastda qoladi.",
-                   reply_markup=main_reply_kb())
+        # /start — to'liq tozalash: chatdagi xabarlar o'chiriladi va toza
+        # boshlang'ich holat ko'rsatiladi.
+        await _reset_my_conversation(u.id, extra_ids=[message.message_id])
+        await _send_fresh_start(message, u)
         return
     if text == BTN_MAIN:
         await db.clear_user_state(u.id)
@@ -4569,14 +4704,10 @@ async def on_text(message: Message) -> None:
                    reply_markup=_menu_kb_for(u))
         return
     if text == BTN_RESET:
-        # 3-talab: suhbat HAR IKKI tomondan tozalanadi va /start bilan
-        # qaytadan boshlash taklif qilinadi (eski tugmalar/suhbat qolmaydi).
-        await _reset_my_conversation(u.id)
-        await _ans(message, 
-            "🔄 *Suhbat tozalandi.* Eski suhbat ham, bot xotirasi ham "
-            "tozalandi.\n\n▶️ Yangi suhbatni boshlash uchun /start ni yuboring.",
-            reply_markup=_menu_kb_for(u),
-        )
+        # Suhbatni TO'LIQ tozalash: chatdagi barcha xabarlar o'chiriladi va
+        # foydalanuvchi /start kabi toza holatga qaytadi.
+        await _reset_my_conversation(u.id, extra_ids=[message.message_id])
+        await _send_fresh_start(message, u)
         return
     if text == BTN_REMIND:
         await db.set_user_state(u.id, "reminder", {})
@@ -4953,6 +5084,8 @@ async def main() -> None:
 
     # Majburiy kanal tekshiruvi — barcha yangilanishlar uchun eng tashqi qatlam.
     dp.update.outer_middleware(sub_gate_outer_middleware)
+    # v11: kiruvchi xabarlarni kuzatish (chat tozalash uchun).
+    dp.message.outer_middleware(track_incoming_middleware)
     log.info(
         "Majburiy kanal tekshiruvi: %s (kanal=%s)",
         "yoqilgan" if config.ENABLE_SUB_GATE else "o'chirilgan",
