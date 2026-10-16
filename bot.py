@@ -195,6 +195,27 @@ async def restore_channels_from_replica() -> int:
         log.error("Replika tiklashda xato: %s", exc)
         return 0
 
+
+async def channels_replica_loop() -> None:
+    """Kanallar ro'yxati nusxasini (`channels.json`) davriy yangilab turadi.
+
+    Bu — kanallar yo'qolishiga qarshi 2-qavat himoya: butun bazani tiklash
+    ishlamay qolsa ham kanallar alohida faylda saqlanib qoladi.
+    """
+    if not backup_mgr.enabled:
+        return
+    await asyncio.sleep(30)
+    while True:
+        try:
+            rows = await db.list_channels_for_replica()
+            if rows:
+                await backup_mgr.push_channels(rows)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error("Kanal nusxasi siklida xato: %s", exc)
+        await asyncio.sleep(900)  # har 15 daqiqada
+
 # --------------------------------------------------------------------------- #
 # System promptlar
 # --------------------------------------------------------------------------- #
@@ -5103,6 +5124,8 @@ async def main() -> None:
 
     if backup_mgr.enabled:
         tasks.append(asyncio.create_task(backup_mgr.loop(), name="backup"))
+        # 2-qavat himoya: kanallar ro'yxati nusxasi davriy yangilanadi.
+        tasks.append(asyncio.create_task(channels_replica_loop(), name="chan_replica"))
 
     if config.SELF_PING_URL:
         tasks.append(
