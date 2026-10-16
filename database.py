@@ -222,7 +222,9 @@ CREATE TABLE IF NOT EXISTS channels (
     channel_id   INTEGER NOT NULL UNIQUE,   -- -100...
     title        TEXT    DEFAULT '',
     username     TEXT    DEFAULT '',
-    connected_at REAL    NOT NULL
+    connected_at REAL    NOT NULL,
+    updated_at   REAL,                      -- oxirgi yangilangan vaqt
+    source       TEXT    DEFAULT 'manual'   -- 'manual' | 'my_chat_member' | 'approve'
 );
 CREATE INDEX IF NOT EXISTS idx_channels_owner ON channels(owner_id);
 
@@ -336,11 +338,34 @@ class Database:
     # ------------------------------------------------------------------ #
     async def connect(self) -> None:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        # WAL + to'liq sinxronizatsiya: konteyner "o'lib qolsa" ham (kill -9,
+        # OOM, Render restart) yozilgan ma'lumot diskka tushgan bo'ladi.
+        # Bu kanallarning yo'qolishiga qarshi birinchi himoya qatlami.
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL;")
+        await self._db.execute("PRAGMA synchronous=FULL;")
         await self._db.executescript(SCHEMA)
         await self._db.commit()
+        await self._migrate()
         log.info("Ma'lumotlar bazasi tayyor: %s", self.path)
+
+    async def _migrate(self) -> None:
+        """Eski bazalarga yetishmayotgan ustunlarni qo'shadi (xavfsiz)."""
+        try:
+            cur = await self.db.execute("PRAGMA table_info(channels)")
+            cols = {r["name"] for r in await cur.fetchall()}
+            if "updated_at" not in cols:
+                await self.db.execute("ALTER TABLE channels ADD COLUMN updated_at REAL")
+                log.info("Migratsiya: channels.updated_at qo'shildi")
+            if "source" not in cols:
+                await self.db.execute(
+                    "ALTER TABLE channels ADD COLUMN source TEXT DEFAULT 'manual'"
+                )
+                log.info("Migratsiya: channels.source qo'shildi")
+            await self.db.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Migratsiyada xato: %s", exc)
 
     async def close(self) -> None:
         if self._db:
@@ -1326,20 +1351,56 @@ class Database:
     # v4: Kanallar
     # ================================================================== #
     async def add_channel(
-        self, owner_id: int, channel_id: int, title: str = "", username: str = ""
-    ) -> None:
+        self, owner_id: int, channel_id: int, title: str = "", username: str = "",
+        source: str = "manual",
+    ) -> dict[str, Any]:
+        """Kanalni bazaga yozadi (UPSERT) va YOZILGANINI o'qib tasdiqlaydi.
+
+        Muhim: commit'dan keyin darhol read-back qilamiz — yozuv haqiqatan
+        saqlanganiga ishonch hosil qilamiz. Aks holda xatolik ko'rinmay
+        qolishi mumkin ("jimgina yo'qolish").
+        """
+        now = time.time()
         await self.db.execute(
             """
-            INSERT INTO channels (owner_id, channel_id, title, username, connected_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO channels
+                (owner_id, channel_id, title, username, connected_at, updated_at, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(channel_id) DO UPDATE SET
-                owner_id = excluded.owner_id,
-                title    = excluded.title,
-                username = excluded.username
+                owner_id   = excluded.owner_id,
+                title      = excluded.title,
+                username   = excluded.username,
+                updated_at = excluded.updated_at,
+                source     = excluded.source
             """,
-            (owner_id, channel_id, title, username, time.time()),
+            (owner_id, channel_id, title, username, now, now, source),
         )
         await self.db.commit()
+
+        # Read-back: yozuv haqiqatan bazada bormi?
+        row = await self.get_channel(channel_id)
+        if row is None:
+            log.error("KANAL SAQLANMADI (read-back bo'sh): %s", channel_id)
+            raise RuntimeError(f"Kanal bazaga yozilmadi: {channel_id}")
+        log.info(
+            "Kanal bazaga saqlandi: id=%s title=%r username=%r owner=%s source=%s",
+            channel_id, title, username, owner_id, source,
+        )
+        return row
+
+    async def list_channels_for_replica(self) -> list[dict[str, Any]]:
+        """`channels.json` nusxasi uchun kanallar ro'yxati (yengil)."""
+        rows = await self.list_channels()
+        return [
+            {
+                "channel_id": r["channel_id"],
+                "title": r["title"],
+                "username": r["username"],
+                "owner_id": r["owner_id"],
+                "connected_at": r["connected_at"],
+            }
+            for r in rows
+        ]
 
     async def get_channel(self, channel_id: int) -> Optional[dict[str, Any]]:
         cur = await self.db.execute(

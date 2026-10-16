@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import json
 import logging
 import sqlite3
 import tempfile
@@ -45,6 +46,9 @@ log = logging.getLogger("backup")
 
 GIST_API = "https://api.github.com/gists"
 BACKUP_FILENAME = "bot.db.b64.gz"
+# Kanal ro'yxatining ALOHIDA matnli nusxasi (DB tiklanmasa ham kanallar
+# saqlanib qolishi uchun "ikkinchi kamar").
+CHANNELS_REPLICA_FILENAME = "channels.json"
 GIST_DESCRIPTION = "AI Manager Bot — SQLite backup (avtomatik)"
 
 
@@ -81,6 +85,12 @@ class BackupManager:
         self.db_path = db_path
         self.token = (token or "").strip()
         self.gist_id = (gist_id or "").strip()
+        # Gist id'ni lokal faylda ham saqlaymiz: env (GIST_ID) berilmagan
+        # bo'lsa ham bir marta yaratilgan gist qayta ishlatiladi (yangi gist
+        # yaratib yuborilmaydi).
+        self.gist_id_file = str(Path(db_path).with_suffix(".gistid"))
+        if not self.gist_id:
+            self.gist_id = self._load_local_gist_id()
         self.interval = max(300, int(interval))
         self.restore_on_start = bool(restore_on_start)
         self.filename = filename
@@ -126,6 +136,119 @@ class BackupManager:
         }
 
     # ------------------------------------------------------------------ #
+    # Gist id'ni lokal saqlash (env bo'lmasa ham barqaror ishlash uchun)
+    # ------------------------------------------------------------------ #
+    def _load_local_gist_id(self) -> str:
+        try:
+            p = Path(self.gist_id_file)
+            if p.exists():
+                val = p.read_text(encoding="utf-8").strip()
+                if val:
+                    log.info("Gist id lokal fayldan olindi: %s", val)
+                    return val
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Lokal gist id'ni o'qib bo'lmadi: %s", exc)
+        return ""
+
+    def _save_local_gist_id(self) -> None:
+        if not self.gist_id:
+            return
+        try:
+            Path(self.gist_id_file).write_text(self.gist_id, encoding="utf-8")
+            log.info("Gist id lokal faylga yozildi: %s", self.gist_id_file)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Lokal gist id'ni yozib bo'lmadi: %s", exc)
+
+    @staticmethod
+    def _db_is_empty(path: str) -> bool:
+        """Bazada na foydalanuvchi, na kanal bo'lsa — "bo'sh" hisoblanadi.
+
+        Bunday bazani zaxiradan tiklash XAVFSIZ: yo'qotadigan ma'lumot yo'q.
+        """
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                chans = conn.execute("SELECT COUNT(*) FROM channels").fetchone()[0]
+            finally:
+                conn.close()
+            return (int(users) + int(chans)) == 0
+        except Exception:  # noqa: BLE001
+            # Jadval yo'q / fayl buzuq — tiklashga urinish foydali.
+            return True
+
+    # ------------------------------------------------------------------ #
+    # Kanal ro'yxati replikasi (channels.json) — qo'shimcha kafolat
+    # ------------------------------------------------------------------ #
+    async def push_channels(self, channels: list[dict[str, Any]]) -> bool:
+        """Kanallar ro'yxatini gist'dagi `channels.json` nusxasiga yozadi."""
+        if not self.enabled:
+            return False
+        try:
+            gist_id = await self.ensure_gist()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Kanal nusxasi: gist tayyorlanmadi: %s", exc)
+            return False
+        payload = json.dumps(
+            {"saved_at": time.time(), "channels": channels},
+            ensure_ascii=False, indent=1,
+        )
+        body = {"files": {CHANNELS_REPLICA_FILENAME: {"content": payload}}}
+        try:
+            async with aiohttp.ClientSession(timeout=self._timeout) as session:
+                async with session.patch(
+                    f"{GIST_API}/{gist_id}", headers=self._headers(), json=body
+                ) as resp:
+                    if resp.status >= 400:
+                        text = (await resp.text())[:200]
+                        log.error("Kanal nusxasini yozishda xato %s: %s", resp.status, text)
+                        return False
+        except Exception as exc:  # noqa: BLE001
+            log.error("Kanal nusxasini yozishda tarmoq xatosi: %s", exc)
+            return False
+        log.info("Kanal nusxasi saqlandi: %d ta kanal", len(channels))
+        return True
+
+    async def pull_channels(self) -> list[dict[str, Any]]:
+        """gist'dagi `channels.json` nusxasini o'qiydi (bo'lmasa — bo'sh ro'yxat)."""
+        if not self.enabled:
+            return []
+        gist_id = self.gist_id or self._load_local_gist_id()
+        if not gist_id:
+            return []
+        try:
+            async with aiohttp.ClientSession(timeout=self._timeout) as session:
+                async with session.get(
+                    f"{GIST_API}/{gist_id}", headers=self._headers()
+                ) as resp:
+                    if resp.status >= 400:
+                        return []
+                    data = await resp.json()
+                files = data.get("files") or {}
+                f = files.get(CHANNELS_REPLICA_FILENAME)
+                if not f:
+                    return []
+                content = f.get("content") or ""
+                if f.get("truncated") or not content:
+                    raw_url = f.get("raw_url") or ""
+                    if raw_url:
+                        async with session.get(
+                            raw_url, headers={"User-Agent": "ai-manager-bot"}
+                        ) as rr:
+                            content = await rr.text()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Kanal nusxasini o'qishda xato: %s", exc)
+            return []
+        try:
+            obj = json.loads(content or "{}")
+            chans = obj.get("channels") or []
+            log.info("Kanal nusxasidan %d ta kanal o'qildi.", len(chans))
+            return chans
+        except Exception as exc:  # noqa: BLE001
+            log.error("Kanal nusxasini tahlil qilishda xato: %s", exc)
+            return []
+
+    # ------------------------------------------------------------------ #
     # Gist
     # ------------------------------------------------------------------ #
     async def ensure_gist(self) -> str:
@@ -149,6 +272,7 @@ class BackupManager:
                 data = await resp.json()
 
         self.gist_id = data.get("id", "")
+        self._save_local_gist_id()
         log.warning(
             "YANGI GIST YARATILDI: %s — bu id'ni env (GIST_ID) sifatida saqlang!",
             self.gist_id,
@@ -309,18 +433,37 @@ class BackupManager:
         return True
 
     async def restore_if_needed(self, force: bool = False) -> bool:
-        """Faqat baza yo'q bo'lsa (yoki `force=True`) tiklaydi."""
+        """Bazani zaxiradan tiklaydi.
+
+        Tiklash SHARTLARI (restart/deploy'da kanallar yo'qolmasligi uchun):
+          1) baza fayli umuman yo'q (yangi konteyner), YOKI
+          2) baza bor, lekin BO'SH (na foydalanuvchi, na kanal) — bu holat
+             yangi konteynerda bootstrap bo'sh fayl yaratganda yuz beradi,
+          3) `force=True`.
+
+        Baza ma'lumotli bo'lsa — TEGILMAYDI (ma'lumot yo'qolmaydi).
+        """
         if not self.enabled:
             log.info("Tiklash o'chirilgan (GITHUB_TOKEN yo'q).")
             return False
-        exists = Path(self.db_path).exists()
-        if exists and not force:
-            log.info("Baza mavjud — tiklash shart emas (%s).", self.db_path)
-            return False
+
         if not self.gist_id:
-            log.info("GIST_ID berilmagan — tiklab bo'lmaydi (birinchi backup'dan keyin paydo bo'ladi).")
+            self.gist_id = self._load_local_gist_id()
+
+        exists = Path(self.db_path).exists()
+        if exists and not force and not self._db_is_empty(self.db_path):
+            log.info("Baza mavjud va ma'lumotli — tiklash shart emas (%s).", self.db_path)
             return False
-        log.info("Baza topilmadi — zaxiradan tiklanmoqda...")
+
+        if not self.gist_id:
+            log.warning(
+                "GIST_ID berilmagan va lokal fayl ham yo'q — tiklab bo'lmaydi. "
+                "Render env'ga GIST_ID qo'shing yoki birinchi backup'ni kuting."
+            )
+            return False
+
+        reason = "force" if force else ("baza yo'q" if not exists else "baza bo'sh")
+        log.info("Zaxiradan tiklanmoqda (sabab: %s)...", reason)
         return await self.pull()
 
     # ------------------------------------------------------------------ #
@@ -333,7 +476,14 @@ class BackupManager:
             return
 
         log.info("Zaxiralash yoqilgan: har %ds da GitHub Gist'ga.", self.interval)
-        await asyncio.sleep(90)  # bot to'liq ishga tushishini kutish
+        await asyncio.sleep(20)  # bot to'liq ishga tushishini kutish
+
+        # Ishga tushgach darhol bir marta zaxiralaymiz — shunda baza
+        # tez orada gist'da paydo bo'ladi (va tiklash uchun mavjud bo'ladi).
+        try:
+            await self.push()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Boshlang'ich zaxiralashda xato: %s", exc)
 
         while True:
             try:

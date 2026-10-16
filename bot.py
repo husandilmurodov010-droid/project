@@ -118,6 +118,61 @@ backup_mgr = backup_mod.BackupManager(
     restore_on_start=config.RESTORE_ON_START,
 )
 
+
+async def save_channels_backup() -> None:
+    """Kanal o'zgarganda DARHOL zaxira oladi (deploy/restart darhol bo'lsa ham).
+
+    Ikki qatlam: (1) butun baza gist'ga, (2) kanallar ro'yxati `channels.json`
+    nusxasiga. Xatolar yashirilmaydi — logga yoziladi.
+    """
+    if not backup_mgr.enabled:
+        return
+    try:
+        ok = await backup_mgr.push()
+        log.info("Kanal o'zgarishi → baza zaxirasi: %s", "muvaffaqiyatli" if ok else "muvaffaqiyatsiz")
+    except Exception as exc:  # noqa: BLE001
+        log.error("Kanal o'zgarishida baza zaxirasida xato: %s", exc)
+    try:
+        rows = await db.list_channels_for_replica()
+        await backup_mgr.push_channels(rows)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Kanal nusxasini saqlashda xato: %s", exc)
+
+
+async def restore_channels_from_replica() -> int:
+    """Baza bo'sh qolsa — gist'dagi `channels.json` nusxasidan tiklaydi.
+
+    Bu 2-qavat himoya: butun baza tiklanmasa ham kanallar saqlanib qoladi.
+    """
+    if not backup_mgr.enabled:
+        return 0
+    try:
+        existing = await db.list_channels()
+        if existing:
+            return 0
+        rows = await backup_mgr.pull_channels()
+        if not rows:
+            log.info("Kanal nusxasi bo'sh — tiklanadigan kanal yo'q.")
+            return 0
+        restored = 0
+        for r in rows:
+            try:
+                await db.add_channel(
+                    int(r.get("owner_id") or 0),
+                    int(r["channel_id"]),
+                    str(r.get("title") or ""),
+                    str(r.get("username") or ""),
+                    source="replica",
+                )
+                restored += 1
+            except Exception as exc:  # noqa: BLE001
+                log.error("Replikadan kanal tiklashda xato (%s): %s", r, exc)
+        log.warning("Kanal nusxasidan tiklandi: %d ta kanal", restored)
+        return restored
+    except Exception as exc:  # noqa: BLE001
+        log.error("Replika tiklashda xato: %s", exc)
+        return 0
+
 # --------------------------------------------------------------------------- #
 # System promptlar
 # --------------------------------------------------------------------------- #
@@ -3801,8 +3856,11 @@ async def handle_channel_connect(message: Message, text: str) -> None:
         await _ans(message, "⚠️ Kanal a'zoligini tekshirib bo'lmadi.")
         return
 
-    await db.add_channel(user_id, chat.id, chat.title or "", chat.username or "")
+    await db.add_channel(user_id, chat.id, chat.title or "", chat.username or "",
+                         source="manual")
     await db.clear_user_state(user_id)
+    # Kanal o'zgardi — zudlik bilan zaxiraga yozamiz.
+    await save_channels_backup()
     uname = f" (@{chat.username})" if chat.username else ""
     await _ans(message, 
         f"✅ *Kanal ulandi!*\n\n"
@@ -4189,6 +4247,9 @@ async def on_my_chat_member(event: ChatMemberUpdated) -> None:
     )
     log.info("Kanal tasdiqlash so'rovi yaratildi: %s (#%s)", chat.id, cid)
     await notify_admins_channel(cid, added_by, chat, chat.id)
+    # Bot kanalga admin qilindi — kanal ro'yxatini darhol zaxiraga yozamiz
+    # (admin tasdiqlashidan oldin ham yo'qolib qolmasin).
+    await save_channels_backup()
 
 
 @dp.callback_query(F.data.startswith("admin:chan:"))
@@ -4212,8 +4273,11 @@ async def on_admin_channel_decision(cb: CallbackQuery) -> None:
         await db.add_channel(
             req["requested_by"] or u.id, req["channel_id"],
             req["title"] or "", req["username"] or "",
+            source="approve",
         )
         await db.set_pending_channel_status(cid, "approved", u.id)
+        # Tasdiqlangandan keyin darhol zaxiraga yozamiz.
+        await save_channels_backup()
         await cb.answer("Ruxsat berildi ✅")
         # So'rov egasiga natijani xabar qilamiz.
         if req.get("requested_by"):
@@ -4853,6 +4917,14 @@ async def main() -> None:
     # --- 3) Baza va ma'lumotlar ---
     await db.connect()
     await load_data()
+    # 2-qavat himoya: agar baza hali ham bo'sh bo'lsa (butun baza tiklanmagan
+    # bo'lsa) — kanallar ro'yxati nusxasidan tiklaymiz.
+    try:
+        if await db.count_channels() == 0:
+            await restore_channels_from_replica()
+        log.info("Bazadagi kanallar soni: %d", await db.count_channels())
+    except Exception as exc:  # noqa: BLE001
+        log.error("Kanal replikasini tekshirishda xato: %s", exc)
     await pool.start()
 
     # --- 4) Bot ma'lumotini health server'ga uzatish ---
@@ -4872,6 +4944,7 @@ async def main() -> None:
         "keys": len(config.GEMINI_API_KEYS),
         "models": len(config.GEMINI_MODELS),
         "db": config.DB_PATH,
+        "channels": await db.count_channels(),
         **backup_mgr.stats(),
         **watchdog_mgr.stats(),
         "sub_gate": bool(config.ENABLE_SUB_GATE),
